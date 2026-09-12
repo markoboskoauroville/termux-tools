@@ -38,13 +38,8 @@ def port_open(port):
         s.close()
 
 
-def group_alive(pgid):
-    try:
-        out = subprocess.run(["ps", "-o", "pid=", "-g", str(pgid)],
-                             capture_output=True, text=True, timeout=10)
-        return len([l for l in out.stdout.split("\n") if l.strip()])
-    except Exception:
-        return -1
+def group_alive(runner):
+    return len(runner.group_members())
 
 
 apps = [a for a in m.discover() if not a.orphan]
@@ -52,7 +47,7 @@ print(f"testing {len(apps)} apps\n", flush=True)
 
 for a in apps:
     r = m.Runner()
-    row = {"name": a.name, "cmd": a.cmd, "port": a.port,
+    row = {"name": a.name, "cmd": a.cmd, "port": a.port, "tui": a.tui,
            "pre_bound": port_open(a.port)}
 
     err = r.start(a)
@@ -62,11 +57,6 @@ for a in apps:
         print(f"{a.name:34} START FAILED  {err}", flush=True)
         continue
     row["start"] = True
-    pgid = None
-    try:
-        pgid = os.getpgid(r.proc.pid)
-    except Exception:
-        pass
 
     time.sleep(SETTLE)
     row["alive"] = r.alive
@@ -80,11 +70,11 @@ for a in apps:
     row["stop_secs"] = round(time.time() - t0, 2)
     time.sleep(0.6)
     row["still_alive"] = r.alive
-    row["group_left"] = group_alive(pgid) if pgid else -1
+    row["group_left"] = group_alive(r)
 
     ok = row["alive"] and not row["still_alive"] and row["group_left"] == 0
     row["pass"] = bool(ok)
-    flag = "ok " if ok else "FAIL"
+    flag = ("ok " if ok else "FAIL") + ("*" if a.tui else " ")
     print(f"{a.name:34} {flag}  alive={row['alive']} "
           f"port={row['port_after']} stop={row['stop_secs']}s "
           f"left={row['group_left']} rc={row['rc_if_dead']} "

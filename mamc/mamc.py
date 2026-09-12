@@ -39,6 +39,10 @@ Emptying the trash is a separate, explicit act.
 
 import curses
 import errno
+import fcntl
+import pty
+import struct
+import termios
 import json
 import os
 import re
@@ -97,6 +101,13 @@ NOT_APP_EXT = {".log", ".txt", ".json", ".md", ".html", ".cfg", ".conf",
                ".pid", ".lock", ".bak", ".tmp", ".sh", ".properties"}
 IMPORTANT = {}
 APPNAME_RE = re.compile(r"^\.?[A-Za-z0-9][A-Za-z0-9._+-]{1,40}$")
+# A full-screen terminal program. It cannot be shown in the run screen: it
+# draws the screen itself and reads the keyboard itself, so it is handed the
+# real terminal and mamc waits behind it.
+TUI_RE = re.compile(rb"import curses|from curses|curses\.wrapper|from blessed"
+                    rb"|import urwid|from textual")
+ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]"
+                     rb"|\x1b[=>78]|[\x00-\x08\x0b-\x1f\x7f]")
 URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|0\.0\.0\.0|localhost)[:/][^\s\"']*")
 
 
@@ -480,6 +491,38 @@ class App:
         return self._size
 
     @property
+    def tui(self):
+        """Does this app take over the whole terminal?
+
+        Looked for in the entry point, every launcher, and every top-level
+        .py in the folder -- tts_reader keeps its curses in tts_app.py, which
+        is not the entry point discovery chose, and it crashed on sight for
+        exactly that reason.
+        """
+        if getattr(self, "_tui", None) is not None:
+            return self._tui
+        srcs = []
+        if self.entry:
+            srcs.append(self.entry)
+        for c, d in self.cmds:
+            srcs.append(os.path.join(d, c))
+        if self.path and os.path.isdir(self.path):
+            for f in os.listdir(self.path):
+                if f.endswith(".py"):
+                    srcs.append(os.path.join(self.path, f))
+        found = False
+        for p in srcs:
+            try:
+                with open(p, "rb") as fh:
+                    if TUI_RE.search(fh.read(400000)):
+                        found = True
+                        break
+            except OSError:
+                continue
+        self._tui = found
+        return found
+
+    @property
     def ident(self):
         """Stable key for the flag file: the folder, or failing that the
         command. Both survive an ma rename; the display name does not."""
@@ -752,6 +795,8 @@ def restore_slot(slot, manifest):
 class Runner:
     def __init__(self):
         self.proc = None
+        self.master = None
+        self.pgid = None
         self.app = None
         self.lines = deque(maxlen=600)
         self.started = 0.0
@@ -787,32 +832,72 @@ class Runner:
         env = dict(os.environ)
         env.setdefault("MA_NESTED", "1")
         env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("TERM", "xterm-256color")
+        # A pty, not pipes. Almost every app on this phone reads its keyboard
+        # -- a [Q] quit bar at the bottom of a server is the local dialect --
+        # and on a pipe those apps see no terminal and exit at once, or die
+        # in cbreak(). Started on pipes, mamc was a launcher that could not
+        # launch most of what it listed.
+        master, slave = pty.openpty()
         try:
+            rows, cols = 40, 100
+            try:
+                rows, cols = os.get_terminal_size()[1], os.get_terminal_size()[0]
+            except OSError:
+                pass
+            fcntl.ioctl(slave, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
             self.proc = subprocess.Popen(
                 argv, cwd=cwd if cwd and os.path.isdir(cwd) else HOME,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, text=True, errors="replace",
-                bufsize=1, start_new_session=True, env=env)
+                stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+                start_new_session=True, env=env)
         except Exception as e:
+            os.close(master)
+            os.close(slave)
             self.proc = None
             return f"could not start: {e}"
+        os.close(slave)
+        self.master = master
         self.app = app
         self.started = time.time()
+        # Taken NOW, while the launcher is alive. night.commute starts its
+        # server with nohup and exits; asking for the group later, from a pid
+        # that has already gone, raises -- and stop() then signalled a dead
+        # launcher while the server it left behind kept serving.
+        try:
+            self.pgid = os.getpgid(self.proc.pid)
+        except OSError:
+            self.pgid = None
         threading.Thread(target=self._pump, daemon=True).start()
         return None
 
     def _pump(self):
-        proc, out = self.proc, []
-        try:
-            for line in proc.stdout:
-                line = line.rstrip("\n")
+        proc, out, partial = self.proc, [], b""
+        master = self.master
+        while True:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            partial += chunk
+            *whole, partial = partial.split(b"\n")
+            for raw in whole:
+                line = ANSI_RE.sub(b"", raw).decode("utf-8", "replace").rstrip("\r")
                 self.lines.append(line)
                 out.append(line)
                 if self.url is None:
                     m = URL_RE.search(line)
                     if m:
                         self.url = m.group(0).rstrip(".,")
-        except Exception:
+        if partial.strip():
+            line = ANSI_RE.sub(b"", partial).decode("utf-8", "replace")
+            self.lines.append(line)
+            out.append(line)
+        try:
+            os.close(master)
+        except OSError:
             pass
         try:
             with open(self.logfile, "w", errors="replace") as fh:
@@ -820,16 +905,44 @@ class Runner:
         except Exception:
             pass
 
+    def group_members(self):
+        """Pids still in the app's process group -- the launcher may be gone
+        while the server it started is not.
+
+        Read from /proc, not from ps. On procps-ng `ps -g` selects by
+        SESSION, and returned nothing for a real process group -- so the
+        check that "nothing was left behind" was a check that ran nothing.
+        Field 5 of /proc/<pid>/stat is the pgrp, and it does not argue.
+        """
+        if not self.pgid:
+            return []
+        found = []
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat", "rb") as fh:
+                    stat = fh.read()
+                # the comm field is in parentheses and may hold spaces
+                after = stat[stat.rindex(b")") + 2:].split()
+                if int(after[2]) == self.pgid:
+                    found.append(int(name))
+            except (OSError, ValueError, IndexError):
+                continue
+        return found
+
+    @property
+    def serving(self):
+        """Alive, or exited but left a server running in its group."""
+        return self.alive or bool(self.group_members())
+
     def stop(self, timeout=4.0):
         """SIGTERM the group, then SIGKILL what is left."""
         if not self.proc:
             return
-        try:
-            pgid = os.getpgid(self.proc.pid)
-        except OSError:
-            pgid = None
+        pgid = self.pgid
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            if self.proc.poll() is not None:
+            if self.proc.poll() is not None and not self.group_members():
                 break
             try:
                 if pgid:
@@ -840,7 +953,8 @@ class Runner:
                 if e.errno != errno.ESRCH:
                     pass
             deadline = time.time() + (timeout if sig == signal.SIGTERM else 1.5)
-            while time.time() < deadline and self.proc.poll() is None:
+            while time.time() < deadline and (self.proc.poll() is None
+                                              or self.group_members()):
                 time.sleep(0.08)
         self.proc.poll()
 
@@ -969,6 +1083,8 @@ class UI:
             mark = "!" if a.important else ("R" if a.registered else " ")
             if a.orphan:
                 badge, ba = "orphan", C_WARN
+            elif a.tui:
+                badge, ba = "tui", C_BAR
             elif port_is_up(a.port):
                 badge, ba = "up", C_OK
             else:
@@ -1081,6 +1197,9 @@ class UI:
             rows.append((f"also      {', '.join(c for c, _ in a.cmds[1:])}",
                          C_DIM, False))
         rows.append((f"port      {a.port or '(unknown)'}", C_NORM, False))
+        if a.tui:
+            rows.append(("screen    full-screen app: takes the terminal, "
+                         "its own q brings you back", C_BAR, False))
         rows.append((f"runs      {a.runs}"
                      + (f"   last {ago(a.last_run)}" if a.runs else ""),
                      C_OK if a.runs else C_DIM, False))
@@ -1180,6 +1299,41 @@ class UI:
             elif k == curses.KEY_PPAGE:
                 top = max(0, top - (h - 4))
 
+    # -- a full-screen app gets the real terminal ------------------------
+    def run_handover(self, app):
+        """Leave curses, give the app the terminal, come back when it quits.
+
+        A curses program cannot be shown inside another curses program's run
+        screen: it draws the screen itself and reads the keyboard itself. So
+        mamc steps aside. One app at a time still holds, trivially -- this
+        blocks. And the app's own quit key is the way back; for every one
+        of these on the phone that key is q.
+        """
+        argv, cwd = self.runner.command_for(app)
+        if not argv:
+            self.note("nothing to run", bad=True)
+            return
+        if self.runner.alive:
+            self.note("one at a time - stop the running one first", bad=True)
+            return
+        note_run(app)
+        env = dict(os.environ)
+        env.setdefault("MA_NESTED", "1")
+        curses.def_prog_mode()
+        curses.endwin()
+        sys.stdout.write(f"\n  mamc: handing you the terminal for {app.name}. "
+                         f"Quit it (usually q) to come back.\n\n")
+        sys.stdout.flush()
+        try:
+            rc = subprocess.call(argv, cwd=cwd if cwd and os.path.isdir(cwd) else HOME,
+                                 env=env)
+        except Exception as e:
+            rc = f"could not start: {e}"
+        curses.reset_prog_mode()
+        self.scr.clear()
+        self.scr.refresh()
+        self.note(f"{app.name} exited (code {rc})", bad=(rc not in (0, None)))
+
     # -- the run screen ----------------------------------------------------
     def run_screen(self, app):
         """Start the app, then hold the terminal until Q.
@@ -1202,7 +1356,7 @@ class UI:
                 last = now
                 h, w = self.scr.getmaxyx()
                 self.scr.erase()
-                alive = self.runner.alive
+                alive = self.runner.serving
                 head = f" running: {app.name} "
                 self.put(0, 0, head.ljust(w - 1),
                          self.attr(C_HEAD if alive else C_WARN, True))
@@ -1240,7 +1394,7 @@ class UI:
                 last = 0
             time.sleep(0.05)
         self.scr.nodelay(False)
-        if self.runner.alive:
+        if self.runner.serving:
             h, w = self.scr.getmaxyx()
             self.put(h - 1, 1, "  stopping...  ".ljust(w - 2),
                      self.attr(C_WARN, True))
@@ -1438,6 +1592,8 @@ class UI:
                 elif self.runner.alive:
                     self.note("one at a time - stop the running one first",
                               bad=True)
+                elif a.tui:
+                    self.run_handover(a)
                 else:
                     self.run_screen(a)
             elif k in (ord("i"), ord("I")) and self.current:
