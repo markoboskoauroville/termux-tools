@@ -69,7 +69,11 @@ Recorded 12.9.2026, for mamc at 1511 lines and talker at 505 lines.
    Now protected, with `claude`, `ma`, `mamc` and `cc`.
 6. **Whitespace-only text was spoken.** It collapsed to `"."`, which is truthy, so a
    Speechify call was spent synthesising a full stop.
-7. **A dead file and two dead symbols** — `control_daemon.py` (written for a notification
+7. **Selecting the fourth row crashed the whole program.** An app can have no folder of its
+   own — MA Player lives entirely in its bin script — and `bin_only` was added to the model
+   without being added to the detail pane, so `a.path.replace(...)` hit `None`. Found by
+   Marko, on the phone, not by the suite. See *What the suite missed* below.
+8. **A dead file and two dead symbols** — `control_daemon.py` (written for a notification
    mechanism that never worked and referenced by nothing), an unused `signal` import, an
    f-string with no placeholders. G3/G4.
 
@@ -82,6 +86,23 @@ a real bug because a test that lies is worse than no test:
   on their own key
 * checks passed and failed on alternate runs — fixed sleeps, now waits for the marker
 * the monkey "crashed" the program — it had pressed `q`
+
+## What the suite missed, and why
+
+**A 33-check UI suite passed while the fourth row of the list crashed on sight.**
+
+It pressed Down twice. MA Player is fourth. That is `checking-the-checks.md`'s central
+failure wearing a new hat: walking two rows of a list and declaring the list drawn is a
+check that runs nothing, and from outside it is indistinguishable from a check that found
+nothing.
+
+`tests/test5_every_row.py` now draws the detail pane for **every** app and builds every
+`targets()` list, under a real pty. The rule it encodes: when a program renders a
+collection, the test renders all of it. Not the first, not a sample — all of it.
+
+The same blindness explains why the monkey missed it. 400 random keys did reach that row,
+but the monkey only asserted that the process was still alive; the crash killed the curses
+program, the pty closed, and "still alive" was read off a process that had already gone.
 
 ## The gates
 

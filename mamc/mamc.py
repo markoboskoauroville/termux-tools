@@ -1046,6 +1046,17 @@ class UI:
             rows.append(("a launcher whose app is gone", C_DIM, False))
             rows.append((getattr(a, "missing_target", "?"), C_NORM, False))
             rows.append(("", C_NORM, False))
+        elif a.path is None:
+            # The third state. An app can have no directory at all and still
+            # be perfectly real: MA Player lives entirely in its bin script.
+            # bin_only was added to the model and not to this pane, so
+            # selecting that one row crashed the whole program on a.path.
+            rows.append(("lives in its launcher, no folder of its own",
+                         C_DIM, False))
+            for c, d in a.cmds:
+                rows.append((os.path.join(d, c).replace(HOME, "~"),
+                             C_NORM, False))
+            rows.append(("", C_NORM, False))
         else:
             rows.append((a.path.replace(HOME, "~"), C_NORM, False))
             rows.append((f"{human(a.size)}   {a.kind}", C_DIM, False))
