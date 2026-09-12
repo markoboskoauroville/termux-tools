@@ -653,6 +653,17 @@ def discover():
         if a.port is None and a.entry:
             a.port = detect_port(a.entry, None)
 
+    # A git checkout with nothing installed from it is SOURCE, not an app.
+    # ~/termux-tools holds mamc's own source and test files, and those mention
+    # Flask, so discovery found it and offered to uninstall it. The test is
+    # not "does it have .git" -- MAHA_TRANSCRIBE_TERMUX_TERMINAL is a clone
+    # too, and a real installed app. The test is whether anything was
+    # installed FROM it: a launcher on PATH, or an ma descriptor.
+    for key, a in list(apps.items()):
+        if (a.path and not a.cmds and not a.desc
+                and os.path.isdir(os.path.join(a.path, ".git"))):
+            del apps[key]
+
     runs = load_runs()
     for a in apps.values():
         mine = runs.get(a.ident) or {}

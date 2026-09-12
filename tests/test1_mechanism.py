@@ -113,6 +113,26 @@ check("allows a launcher inside a bin dir",
       e.owns(os.path.join(m.BIN_DIRS[0], "anything")), True)
 import shutil as _sh; _sh.rmtree(tmp, ignore_errors=True)
 
+print("a checkout is source, not an app")
+import subprocess as _sp
+_repo = os.path.join(m.HOME, ".zz_checkout")
+os.makedirs(os.path.join(_repo, ".git"), exist_ok=True)
+open(os.path.join(_repo, "server.py"), "w").write("from flask import Flask\n")
+_names = [x.name for x in m.discover()]
+check("a git checkout with nothing installed is not listed",
+      "zz_checkout" in _names, False)
+# but a checkout that DID install something is still an app
+_sp.run(["cp", "/data/data/com.termux/files/usr/bin/mamc",
+         os.path.join(m.HOME, ".local", "bin", "zzcheckoutcmd")], check=False)
+with open(os.path.join(m.HOME, ".local", "bin", "zzcheckoutcmd"), "w") as fh:
+    fh.write('#!/bin/bash\nAPPDIR="$HOME/.zz_checkout"\npython "$APPDIR/server.py"\n')
+os.chmod(os.path.join(m.HOME, ".local", "bin", "zzcheckoutcmd"), 0o755)
+_names = [x.name for x in m.discover()]
+check("a checkout WITH an installed launcher is still an app",
+      "zz_checkout" in _names, True)
+os.remove(os.path.join(m.HOME, ".local", "bin", "zzcheckoutcmd"))
+_sh2 = __import__("shutil"); _sh2.rmtree(_repo, ignore_errors=True)
+
 print("speakable - the talker's cleaner, same discipline")
 sys.path.insert(0, "/root/.talker")
 import talker as tk

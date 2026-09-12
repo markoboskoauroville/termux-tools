@@ -42,14 +42,14 @@ Recorded 12.9.2026, for mamc at 1511 lines and talker at 505 lines.
 
 | | result |
 |---|---|
-| **Test 1** mechanism, alone | 53 assertions, pass |
+| **Test 1** mechanism, alone | 55 assertions, pass |
 | **Test 2** inside the running app | 33 checks over a real pty, pass |
 | **Test 3** the ugly cases | 27 checks, pass |
 | **Test 4** the upgrade | 19 checks, pass |
 | **G6** monkey + soak | 400 random keys, 12 start/stop cycles, pass |
 | **run-and-quit sweep** | every app on the phone started and stopped |
 
-**Seven real faults, found and fixed:**
+**Nine real faults, found and fixed:**
 
 1. **A descriptor claiming `paths=/etc` was obeyed.** Uninstalling such an app would have
    moved `/etc` and `/usr` into the trash. Found by Test 3 (HOSTILE). `App.owns()` now
@@ -73,7 +73,13 @@ Recorded 12.9.2026, for mamc at 1511 lines and talker at 505 lines.
    own — MA Player lives entirely in its bin script — and `bin_only` was added to the model
    without being added to the detail pane, so `a.path.replace(...)` hit `None`. Found by
    Marko, on the phone, not by the suite. See *What the suite missed* below.
-8. **A dead file and two dead symbols** — `control_daemon.py` (written for a notification
+8. **mamc listed its own source repository as an app.** `~/termux-tools` holds mamc's
+   source and tests, those files mention Flask, so discovery found it and offered to
+   uninstall it. A checkout with nothing installed from it is source, not an app — but the
+   test cannot be "does it have `.git`", because `MAHA_TRANSCRIBE_TERMUX_TERMINAL` is a clone
+   too and a real installed app. The test is whether anything was installed *from* it: a
+   launcher on PATH, or an ma descriptor.
+9. **A dead file and two dead symbols** — `control_daemon.py` (written for a notification
    mechanism that never worked and referenced by nothing), an unused `signal` import, an
    f-string with no placeholders. G3/G4.
 
