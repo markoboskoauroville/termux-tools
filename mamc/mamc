@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# mamc - browse, run and uninstall the apps on this phone.
+exec python3 "$HOME/.mamc/mamc.py" "$@"

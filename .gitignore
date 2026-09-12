@@ -1,0 +1,11 @@
+# state and secrets, never source
+*.json
+!package.json
+*.log
+*.sock
+*.mp3
+*.pid
+trash/
+logs/
+__pycache__/
+speechify_api.txt
