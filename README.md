@@ -100,9 +100,15 @@ nothing.
 `targets()` list, under a real pty. The rule it encodes: when a program renders a
 collection, the test renders all of it. Not the first, not a sample — all of it.
 
-The same blindness explains why the monkey missed it. 400 random keys did reach that row,
-but the monkey only asserted that the process was still alive; the crash killed the curses
-program, the pty closed, and "still alive" was read off a process that had already gone.
+**The monkey missed it too, and for a different reason worth writing down.** Replaying its
+exact seed shows which rows it selected: 0, 1, 2, then 5, 6, 7 … It never landed on 4 at
+all. Its key list includes PageUp and PageDown, and those jumps hopped straight over the one
+row that crashes. Nine more navigation keys were swallowed while it was in filter mode.
+
+So: **a random monkey is not coverage, and must not be reported as if it were.** 400
+keypresses that happen to skip a row prove nothing about that row. The monkey is for finding
+states nobody imagined; enumerating every item of a collection is a separate job, and needs a
+separate test that walks the list deliberately.
 
 ## The gates
 
