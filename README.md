@@ -167,6 +167,9 @@ has the line.
 
 * **The curl line on a phone that never had these programs.** This phone had
   them; the link step is tested, the clone step is the next real install.
+* **The repository was still private when this was written.** The history is
+  audited clean; making it public is one `gh repo edit` line that a Claude Code
+  session may not run, and the curl line works only after it.
 * **The nine legacy apps open Chrome only until their next reinstall**: the
   edit is in the running files, not in their repositories.
 * **The talker and the notifier are untouched** by this delivery except for

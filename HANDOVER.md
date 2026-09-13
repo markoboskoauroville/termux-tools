@@ -1,7 +1,9 @@
 # HANDOVER: termux-tools (13.9.2026)
 
 Version: `version.py`, one whole number (v1 is the first numbered one). Repository:
-`markoboskoauroville/termux-tools`, public. No installer file: the artefact is the checkout, the
+`markoboskoauroville/termux-tools`, private until Marko runs
+`gh repo edit markoboskoauroville/termux-tools --visibility public --accept-visibility-change-consequences`
+(the history was audited clean on 13.9.2026); the curl line below works only after that. No installer file: the artefact is the checkout, the
 curl line in README.md installs it, and mamc's `u` key updates it. The reasons for what is here are
 in the delivery records at the bottom of README.md, newest first.
 
