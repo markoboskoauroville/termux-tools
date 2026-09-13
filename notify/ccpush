@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ccpush TEXT - push a message into the running Claude Code session.
+exec python3 "$HOME/.ccnotify/ccnotify.py" push "$@"

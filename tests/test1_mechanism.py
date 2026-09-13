@@ -142,6 +142,60 @@ check("code fence not read out", "rm -rf" in tk.speakable("a\n```\nrm -rf /\n```
 check("empty in, empty out", tk.speakable(""), "")
 check("whitespace only", tk.speakable("   \n\n  "), "")
 check("a question mark survives", tk.speakable("Is it on?").endswith("?"), True)
+import json
+
+print("play_file - a Stop is a finished playback, not a failure to fall back from")
+# mpv exits 4 when told to quit over its socket. A fake mpv on PATH that
+# does exactly that must be read as "stopped", and must NOT hand the clip to
+# the Termux player -- that was the bug where Stop made her start over.
+import subprocess as _sp2
+_fake = tempfile.mkdtemp(dir=m.HOME, prefix=".zz_fakebin_")
+for _name, _rc in (("mpv", 4), ("termux-media-player", 0)):
+    with open(os.path.join(_fake, _name), "w") as fh:
+        fh.write("#!/bin/sh\n" + ("echo Now Playing\n" if _name != "mpv" else "") + f"exit {_rc}\n")
+    os.chmod(os.path.join(_fake, _name), 0o755)
+_oldpath = os.environ["PATH"]
+os.environ["PATH"] = _fake + ":" + _oldpath
+_clip = os.path.join(_fake, "clip.mp3"); open(_clip, "wb").write(b"x")
+try:
+    if os.path.exists(tk.BG_FLAG): os.remove(tk.BG_FLAG)
+    _ok, _may_delete = tk.play_file(_clip, "t")
+    check("mpv exit 4 is reported as a completed playback", (_ok, _may_delete), (True, True))
+    check("and the background player was NOT given the clip", os.path.exists(tk.BG_FLAG), False)
+    with open(os.path.join(_fake, "mpv"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 2\n")
+    _ok, _may_delete = tk.play_file(_clip, "t")
+    check("a real mpv failure (exit 2) still falls back", (_ok, _may_delete), (True, False))
+    check("and the fallback is remembered so it can be stopped", os.path.exists(tk.BG_FLAG), True)
+finally:
+    os.environ["PATH"] = _oldpath
+    if os.path.exists(tk.BG_FLAG): os.remove(tk.BG_FLAG)
+    _sh.rmtree(_fake, ignore_errors=True)
+
+print("ccnotify - the pieces that do not need a phone")
+sys.path.insert(0, "/root/.ccnotify")
+import ccnotify as cn
+check("both spellings of a /root path", cn.spellings("/root/.claude/inbox/x.sock"),
+      ["/root/.claude/inbox/x.sock", "/data/data/com.termux/files/home/.claude/inbox/x.sock"])
+check("both spellings of a Termux path", cn.spellings("/data/data/com.termux/files/home/a")[1], "/root/a")
+check("a path outside home has one spelling", cn.spellings("/tmp/x"), ["/tmp/x"])
+check("headline flattens and trims", cn.headline("**Done.**\n\nThe `x` file " + "y" * 200).endswith("…"), True)
+check("headline strips markdown", cn.headline("**Done.** ok"), "Done. ok")
+_tp = os.path.join(m.HOME, ".zz_t1_transcript.jsonl")
+with open(_tp, "w") as fh:
+    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n")
+    fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "first"}]}}) + "\n")
+    fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "rm -rf /"}}]}}) + "\n")
+check("last text block, skipping a tool-only turn", cn.last_assistant_text(_tp), "first")
+check("tool input is never read as a headline", "rm -rf" in cn.last_assistant_text(_tp), False)
+os.remove(_tp)
+check("push with nothing to send is refused", cn.push("")[0], False)
+_saved = cn.INBOX
+cn.INBOX = os.path.join(m.HOME, ".zz_no_inbox.json")
+check("push with no announced session is refused, not hung", cn.push("x")[0], False)
+cn.INBOX = _saved
 
 print(f"\n{count} assertions, {len(fails)} failures")
 for f in fails:

@@ -8,8 +8,7 @@
     talk stop        shut up mid-sentence
     talk pause       pause speech
     talk resume      resume paused speech
-    talk pause       pause speech (backgrounded)
-    talk resume      resume paused speech
+    talk toggle      pause if playing, resume if paused (the notification button)
     talk test        one line, to hear that it works
 
 WHY IT IS A HOOK AND NOT A HABIT. Claude cannot decide to speak; it writes
@@ -45,6 +44,8 @@ TALK_DIR = os.path.join(HOME, ".talker")
 STATE_FILE = os.path.join(TALK_DIR, "state.json")
 PID_FILE = os.path.join(TALK_DIR, "playing.pid")
 IPC_SOCKET = os.path.join(TALK_DIR, "mpv.sock")
+# mpv's exit status for "quit because I was asked to" (see mpv(1), EXIT CODES).
+MPV_QUIT_RC = 4
 # Written only when a clip was handed to one of the Termux players. Stopping
 # those means a round trip out to Termux:API, which costs the better part of
 # five seconds each -- worth paying to silence something that is actually
@@ -251,9 +252,13 @@ def show_controls(text):
             "--priority", "high",
             "--ongoing",
             "--alert-once",
-            "--button1", "Pause", "--button1-action", TALK_BIN + " pause",
-            "--button2", "Resume", "--button2-action", TALK_BIN + " resume",
-            "--button3", "Stop", "--button3-action", TALK_BIN + " stop",
+            # Three buttons is all Android gives a notification. Pause and
+            # Resume were two of them, so there was no room for Off -- and
+            # Off is the one you want when she starts reading a long reply
+            # you have already seen. One toggle does both halves.
+            "--button1", "Pause/Resume", "--button1-action", TALK_BIN + " toggle",
+            "--button2", "Stop", "--button2-action", TALK_BIN + " stop",
+            "--button3", "Off", "--button3-action", TALK_BIN + " off",
             "--on-delete", TALK_BIN + " stop",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
@@ -303,6 +308,14 @@ def play_file(path, text=""):
             return True, True
         if rc < 0:
             log(f"stopped by signal {-rc}")
+            return True, True
+        # mpv exits 4 when it was told to quit -- which is exactly what the
+        # Stop button does, over the IPC socket. That is a finished playback.
+        # It was being read as a failure, and the fallback below then handed
+        # the same clip to Android's player: press Stop, and she started the
+        # sentence again from the top, now beyond the reach of the socket.
+        if rc == MPV_QUIT_RC:
+            log("stopped by request")
             return True, True
         log(f"mpv rc={rc}")
     except FileNotFoundError:
@@ -498,9 +511,4 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
-
-# ---------------------------------------------------------------------------
-#  Manual pause/stop/resume controls while speech is happening
-# ---------------------------------------------------------------------------
 

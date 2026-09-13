@@ -64,7 +64,11 @@ def main():
     st = talker.load_state()
     if not st.get("on"):
         return 0
-    text = last_assistant_text(data.get("transcript_path"))
+    # The reply is in the hook input itself; the transcript is the fallback
+    # for an older Claude Code that does not send it. A session started with
+    # transcript saving off has no file, and she was silent in those.
+    text = (data.get("last_assistant_message") or
+            last_assistant_text(data.get("transcript_path")))
     if not text.strip():
         return 0
     subprocess.Popen(

@@ -9,3 +9,4 @@ trash/
 logs/
 __pycache__/
 speechify_api.txt
+tests/run_all.json

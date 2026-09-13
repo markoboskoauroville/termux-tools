@@ -81,7 +81,7 @@ for a in apps:
           f"| {row['last_line'][:50]}", flush=True)
     RESULTS.append(row)
 
-out = "/tmp/claude-0/-storage-emulated-0-Download-claudecode/85d0f06a-f318-45f8-997b-07e022982d04/scratchpad/run_all.json"
+out = os.environ.get("RUN_ALL_OUT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_all.json")
 json.dump(RESULTS, open(out, "w"), indent=2)
 passed = sum(1 for r in RESULTS if r.get("pass"))
 print(f"\n{passed}/{len(RESULTS)} ran and quit cleanly")

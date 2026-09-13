@@ -79,7 +79,11 @@ SKIP_DIRS = {
 }
 PROTECTED = {
     "claude", "claude-termux-update", "mamc", "ma", "ecosystem", "python",
-    "talk",
+    # Claude's own tooling on this phone: the talker and the notifier. Each
+    # has a launcher that names a folder in HOME, which is exactly what makes
+    # something look like an app -- and uninstalling either breaks the hooks
+    # in ~/.claude/settings.json that call them.
+    "talk", "ccnotify", "ccpush",
     "python3", "pip", "node", "npm", "git", "bash", "login", "prove", "h2ph",
     "scan-build", "web", "termux-notification", "toml-update",
 }
