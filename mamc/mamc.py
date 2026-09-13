@@ -4,6 +4,9 @@
     mamc                  open the browser
     mamc --list           print the inventory and exit
     mamc --restore        restore something from the trash
+    mamc --version        the installed version, one whole number
+    mamc --no-run         browse only: Enter on an app refuses to start it
+    mamc --update         check GitHub, show installed -> available, ask, pull
 
 WHAT IT IS FOR. The apps on this phone live in three places at once: a folder
 in $HOME, a launcher script in one of two bin directories, and -- for the few
@@ -18,10 +21,18 @@ TWO RULES, BOTH DELIBERATE.
 One app at a time. The launcher owns the process it starts, so there is never a
 second server holding a port you are trying to use.
 
-Q closes it. Every app, the same key, no Enter. The app does not need to know:
-this program owns the terminal and the child process group, so Q is answered
-here and the child is stopped from outside. An app that never learned to quit
-politely still quits.
+THE RUN SCREEN IS A TERMINAL. Every key goes to the app: numbers, Enter, the
+arrows, its own q. mamc keeps two gestures for itself, and asks before acting
+on either: Ctrl-C (the CR.C key on the phone's keyboard) and Esc pressed
+twice. Both mean "stop it and come back", and the child is stopped from
+outside, so an app that never learned to quit politely still quits. The
+first version answered only Q and showed the output with the colour
+stripped: a menu that wanted 1, Enter and the arrows was a wall
+(13.9.2026, maha.commute).
+
+    mamc --no-run         browse and inspect only; Enter on an app refuses.
+                          For a monkey test, which must not type into a
+                          real app's menu.
 
 MOST-RUN FIRST. Every start is counted, and the list is ordered by that count,
 so the apps you actually live in are at the top. ma's own counts are read in at
@@ -43,14 +54,32 @@ another folder (or a new one), and that choice is kept in
 ~/.mamc/categories.json against the app's path. The filter (/) searches
 across every folder at once, so a name you know is never more than a
 keystroke away.
+
+THE LIVE PORT. An app picks its port when it starts (portpick.py: preferred,
+then the next fifteen, then any), so the number in its source is only where
+it would LIKE to be. Every app that picks writes the number it actually
+bound to ~/.mantra/ports/<command> and removes it on the way out
+(modules/ports.md §3). This reads that file first, and trusts it only if the
+port answers -- an app that was killed leaves its line behind.
+
+THE O KEY. o opens the selected app's page, in Chrome whatever the phone's
+default browser is (Marko, 13.9.2026): termux-open-url takes the package as
+its second argument. The port is the live one from the registry when the
+app is up, otherwise the one in its source.
+
+THE U KEY. u fetches origin/main of the checkout this file runs from, shows
+installed -> available, and updates on y: git pull --ff-only, the installer's
+local step, then a restart of this program. Never without the y.
 """
 
 import curses
 import errno
 import fcntl
 import pty
+import select
 import struct
 import termios
+import tty
 import json
 import os
 import re
@@ -76,6 +105,16 @@ LOG_DIR = os.path.join(MAMC_DIR, "logs")
 IMPORTANT_FILE = os.path.join(MAMC_DIR, "important.json")
 RUNS_FILE = os.path.join(MAMC_DIR, "runs.json")
 CATEGORIES_FILE = os.path.join(MAMC_DIR, "categories.json")
+# the live registry every port-picking app writes (modules/ports.md §3)
+PORTS_DIR = os.path.join(HOME, ".mantra", "ports")
+# the checkout this program runs from: ~/termux-tools, or wherever the file is
+REPO_DIR = os.environ.get("MAMC_REPO") or os.path.dirname(os.path.dirname(
+    os.path.realpath(__file__)))
+# a whole number and nothing after it but a comment: 1.2 is not a version here
+VERSION_RE = re.compile(r"^APP_VERSION\s*=\s*(\d+)\s*(?:#.*)?$", re.M)
+GIT_TIMEOUT = 25
+CHROME = "com.android.chrome"
+NO_RUN = "--no-run" in sys.argv
 
 # How an app is filed when nobody has said otherwise: the first rule whose
 # keywords appear in the app's name, command or folder name wins. The order
@@ -140,6 +179,107 @@ TUI_RE = re.compile(rb"import curses|from curses|curses\.wrapper|from blessed"
 ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]"
                      rb"|\x1b[=>78]|[\x00-\x08\x0b-\x1f\x7f]")
 URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|0\.0\.0\.0|localhost)[:/][^\s\"']*")
+
+
+# ---------------------------------------------------------------------------
+#  The version, and the U key
+#
+#  One whole number in version.py at the top of the checkout (versioning.md).
+#  It is read with a regular expression, here and off origin/main, so an
+#  update never guesses at a number and never imports anything to learn one.
+#  The shape is KEYRING_TERMUX/selfupdate.py, folded into this one file.
+# ---------------------------------------------------------------------------
+
+class UpdateError(Exception):
+    """A sentence safe to show on the screen."""
+
+
+def read_version(text):
+    m = VERSION_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def installed_version(repo=None):
+    """The number in the checkout's version.py, or None for a checkout that
+    predates the file (the unnumbered delivery of 13.9.2026)."""
+    try:
+        with open(os.path.join(repo or REPO_DIR, "version.py")) as f:
+            return read_version(f.read())
+    except OSError:
+        return None
+
+
+def is_checkout(repo=None):
+    repo = repo or REPO_DIR
+    return (os.path.isdir(os.path.join(repo, ".git"))
+            and os.path.isfile(os.path.join(repo, "mamc", "mamc.py")))
+
+
+def _git(args, repo=None):
+    # GIT_TERMINAL_PROMPT=0: a private repository, or a token that went
+    # stale, must fail with a sentence -- not sit waiting for a password on
+    # a screen curses owns.
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        return subprocess.run(["git", "-C", repo or REPO_DIR] + args,
+                              capture_output=True, text=True,
+                              timeout=GIT_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired:
+        raise UpdateError(f"git {args[0]} did not answer in {GIT_TIMEOUT}s"
+                          " - check the network and try again")
+    except FileNotFoundError:
+        raise UpdateError("git is not installed")
+
+
+def check_update(repo=None):
+    """Fetch, then read version.py off origin/main. Nothing in the working
+    tree moves. Returns {installed, latest, behind, up_to_date}."""
+    repo = repo or REPO_DIR
+    if not is_checkout(repo):
+        raise UpdateError(f"{repo.replace(HOME, '~')} is not a git checkout"
+                          " - reinstall with the curl line in README.md")
+    fetch = _git(["fetch", "--quiet", "origin", "main"], repo)
+    if fetch.returncode != 0:
+        last = (fetch.stderr or "").strip().splitlines()
+        why = last[-1] if last else "unknown git error"
+        if "could not read Username" in why or "Authentication failed" in why:
+            why = "the repository is private, or the token is gone"
+        raise UpdateError("could not reach GitHub: " + why)
+    show = _git(["show", "origin/main:version.py"], repo)
+    latest = read_version(show.stdout) if show.returncode == 0 else None
+    if latest is None:
+        raise UpdateError("origin/main has no readable version.py")
+    count = _git(["rev-list", "--count", "HEAD..origin/main"], repo)
+    behind = (int(count.stdout.strip())
+              if count.returncode == 0 and count.stdout.strip().isdigit()
+              else None)
+    installed = installed_version(repo)
+    return {"installed": installed, "latest": latest, "behind": behind,
+            "up_to_date": latest <= (installed or 0)
+            and (behind == 0 if behind is not None else True)}
+
+
+def perform_update(repo=None):
+    """git pull --ff-only, then the installer's local step (the wrappers and
+    the copies the hooks read). Either lands whole or does not move."""
+    repo = repo or REPO_DIR
+    pull = _git(["pull", "--ff-only", "origin", "main"], repo)
+    if pull.returncode != 0:
+        last = (pull.stderr or pull.stdout or "").strip().splitlines()
+        raise UpdateError("git pull failed: " +
+                          (last[-1] if last else "unknown error"))
+    installer = os.path.join(repo, "install-termux.sh")
+    if os.path.isfile(installer):
+        try:
+            r = subprocess.run(["bash", installer, "link"],
+                               capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            raise UpdateError("the installer's link step did not finish")
+        if r.returncode != 0:
+            last = (r.stderr or r.stdout or "").strip().splitlines()
+            raise UpdateError("the installer's link step failed: " +
+                              (last[-1] if last else "no output"))
+    return f"updated to v{installed_version(repo) or '?'}"
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +529,86 @@ def port_is_up(port):
         s.close()
 
 
+def registry_port(cmd):
+    """The number in ~/.mantra/ports/<cmd>, or None. Never raises: a missing
+    file, a garbage file and an unreadable folder are all "no line"."""
+    cmd = str(cmd or "").strip()
+    if not cmd or "/" in cmd or cmd in (".", ".."):
+        return None
+    try:
+        with open(os.path.join(PORTS_DIR, cmd)) as f:
+            port = int(f.read(16).strip())
+    except (OSError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def live_port(app):
+    """The port the app is serving on RIGHT NOW, from the registry, or None.
+
+    Only a line whose port answers counts: the file outlives an app that
+    was killed rather than quit, so the line alone is a claim, not a fact.
+    Every command name of the app is tried, the primary first.
+    """
+    names = []
+    for name in [app.cmd] + [c for c, _ in app.cmds]:
+        if name and name not in names:
+            names.append(name)
+    for name in names:
+        port = registry_port(name)
+        if port and port_is_up(port):
+            return port
+    return None
+
+
+_HAS_PKG = {}
+
+
+def has_package(pkg):
+    """Is an Android package installed? `pm list packages` answers from
+    Termux's shell and from inside the PRoot (termux-proot-working.md §3).
+    Cached: it is a second per call and the answer does not change while
+    this program runs."""
+    if pkg not in _HAS_PKG:
+        try:
+            r = subprocess.run(["pm", "list", "packages", pkg],
+                               capture_output=True, text=True, timeout=10)
+            _HAS_PKG[pkg] = ("package:" + pkg) in r.stdout.split()
+        except Exception:
+            _HAS_PKG[pkg] = False
+    return _HAS_PKG[pkg]
+
+
+def open_page(url):
+    """Chrome, whatever the phone's default browser is (Marko, 13.9.2026).
+
+    termux-open-url takes an app package as its second argument, so the
+    same Termux:API call that opened the default browser opens Chrome
+    instead; without Chrome on the phone, the default; on a Mac, open; on
+    Linux, xdg-open. Bounded by timeout(1): a Termux:API call that waits on
+    an app that never answers is an orphan Android counts against the
+    phantom-process limit (termux-proot-working.md §3). Returns what was
+    used, or "" when nothing could be.
+    """
+    chain = []
+    if shutil.which("termux-open-url"):
+        if has_package(CHROME):
+            chain.append(["termux-open-url", url, CHROME])
+        chain.append(["termux-open-url", url])
+    for other in ("open", "xdg-open"):
+        if shutil.which(other):
+            chain.append([other, url])
+    for cmd in chain:
+        run = (["timeout", "-k", "5", "30"] + cmd) if shutil.which("timeout") else cmd
+        try:
+            subprocess.Popen(run, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return " ".join(cmd[:1] + cmd[2:]) if len(cmd) > 2 else cmd[0]
+        except Exception:
+            continue
+    return ""
+
+
 def lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -460,9 +680,13 @@ def scan_launchers():
     is decided later.
     """
     found = {}
+    # Four spellings of home, not three: the keyring's wrapper says
+    # /root/KEYRING_TERMUX/keyring in full, and a pattern that knew only
+    # $HOME, ~ and the Termux spelling saw no path in it at all -- so the
+    # newest app on the phone was not in the list (13.9.2026).
     ref = re.compile(
-        r"""(?:\$HOME|~|/data/data/com\.termux/files/home)/[A-Za-z0-9._+-]"""
-        r"""[^"'\s:;)}]*""")
+        r"""(?:\$HOME|~|/data/data/com\.termux/files/home|""" + re.escape(HOME)
+        + r""")/[A-Za-z0-9._+-][^"'\s:;)}]*""")
     for bd in BIN_DIRS:
         if not os.path.isdir(bd):
             continue
@@ -488,10 +712,23 @@ def scan_launchers():
                 txt = ""
             for m in ref.finditer(txt):
                 t = unspell(expand(m.group(0)).rstrip("/\"'"))
-                if t.endswith(".py") or t.endswith(".sh"):
+                # a launcher that runs a launcher INSIDE the app's folder
+                # (exec bash ~/COCKPIT_TERMUX/cockpit) names a file, and the
+                # app is the folder around it. Read as a folder, it was an
+                # orphan: "a launcher whose app is gone" (13.9.2026).
+                if t.endswith(".py") or t.endswith(".sh") or os.path.isfile(t):
                     t = os.path.dirname(t)
                 rel = os.path.relpath(t, HOME).split(os.sep)[0]
-                if rel in SKIP_DIRS or rel.startswith("..") or t == HOME:
+                if rel.startswith("..") or t == HOME:
+                    continue
+                # SKIP_DIRS is for WALKING home, not for a path a launcher
+                # names outright: mapool runs the finder from a folder under
+                # storage/, and skipping it there hid the newest app on the
+                # phone (13.9.2026). Under a skipped dir, a folder with python
+                # in it is an app; anything else is configuration.
+                if rel in SKIP_DIRS and not (
+                        os.path.isdir(t) and any(
+                            f.endswith(".py") for f in os.listdir(t))):
                     continue
                 if not APPNAME_RE.match(rel):
                     continue
@@ -953,6 +1190,8 @@ class Runner:
         self.logfile = os.path.join(LOG_DIR, f"{app.name.replace('/', '_')}.log")
         self.lines.clear()
         self.url = None
+        if not hasattr(self, "mirror"):
+            self.mirror = None      # a fd the pump copies raw bytes to
         env = dict(os.environ)
         env.setdefault("MA_NESTED", "1")
         env["PYTHONUNBUFFERED"] = "1"
@@ -1005,6 +1244,14 @@ class Runner:
                 break
             if not chunk:
                 break
+            mirror = self.mirror
+            if mirror is not None:
+                # the run screen is the app's terminal: colour, cursor
+                # moves and all, straight through
+                try:
+                    os.write(mirror, chunk)
+                except OSError:
+                    pass
             partial += chunk
             *whole, partial = partial.split(b"\n")
             for raw in whole:
@@ -1221,7 +1468,9 @@ class UI:
         h, w = self.scr.getmaxyx()
         split = max(28, int(w * 0.52))
 
-        title = " mamc — the apps on this phone "
+        v = installed_version()
+        title = f" mamc v{v} — the apps on this phone " if v else \
+            " mamc — the apps on this phone "
         self.put(0, 0, title.ljust(w - 1), self.attr(C_HEAD, True))
         running = ""
         if self.runner.alive:
@@ -1269,13 +1518,14 @@ class UI:
                     badge, ba = "orphan", C_WARN
                 elif a.tui:
                     badge, ba = "tui", C_BAR
-                elif port_is_up(a.port):
+                elif live_port(a) or port_is_up(a.port):
                     badge, ba = "up", C_OK
                 else:
                     badge, ba = "", C_DIM
                 size = human(a.size) if a.path else "-"
                 cmdtxt = a.cmd or "-"
-                porttxt = str(a.port or "-")
+                # the port it is ON beats the port it would like
+                porttxt = str(live_port(a) or a.port or "-")
                 important = a.important
             runs = f"{a.runs}\u00d7" if a.runs else ""
             # Build the row to FIT the pane rather than formatting a fixed
@@ -1335,19 +1585,19 @@ class UI:
         elif at_root:
             self.put(h - 2, 1,
                      "↑↓ move   enter open   / filter every folder   "
-                     "t trash   r rescan", self.attr(C_DIM))
+                     "t trash   r rescan   u update", self.attr(C_DIM))
         else:
             self.put(h - 2, 1,
-                     "↑↓ move   enter run   i info   l log   "
+                     "↑↓ move   enter run   o open page   i info   l log   "
                      "d uninstall   c move   ! flag   ← back",
                      self.attr(C_DIM))
         if at_root:
             keys = [("enter", "open"), ("/", "filter"), ("t", "trash"),
-                    ("q", "quit")]
+                    ("u", "update"), ("q", "quit")]
         else:
-            keys = [("enter", "run"), ("d", "uninstall"), ("c", "move"),
-                    ("!", "flag"), ("←", "back"), ("/", "filter"),
-                    ("q", "quit")]
+            keys = [("enter", "run"), ("o", "open"), ("d", "uninstall"),
+                    ("c", "move"), ("!", "flag"), ("←", "back"),
+                    ("/", "filter"), ("q", "quit")]
         x = 1
         for k, label in keys:
             if x + len(k) + len(label) + 3 > w:
@@ -1428,7 +1678,12 @@ class UI:
                 rows.append((f"aliases   {a.desc['alias']}", C_DIM, False))
         else:
             rows.append(("ma        not registered", C_DIM, False))
-        if port_is_up(a.port):
+        lp = live_port(a)
+        if lp:
+            rows.append(("", C_NORM, False))
+            rows.append((f"● serving on {lp}   o opens it", C_OK, True))
+            rows.append((f"  said by ~/.mantra/ports/{a.cmd}", C_DIM, False))
+        elif port_is_up(a.port):
             rows.append(("", C_NORM, False))
             rows.append((f"● something is listening on {a.port}", C_OK, True))
         rows.append(("", C_NORM, False))
@@ -1555,75 +1810,132 @@ class UI:
 
     # -- the run screen ----------------------------------------------------
     def run_screen(self, app):
-        """Start the app, then hold the terminal until Q.
+        """Start the app and BE ITS TERMINAL until it exits or is stopped.
 
-        The whole point of this screen: it reads single keys with no Enter,
-        and Q stops the child from outside. Nothing about the app has to
-        cooperate.
+        mamc steps out of curses, the app's bytes go to the screen as they
+        are, and every key goes to the app -- except Ctrl-C and a double
+        Esc, which ask whether to stop it. Q used to be the only key that
+        did anything here, and it did not reach the app; nothing did.
         """
+        if NO_RUN:
+            self.note("running is off (--no-run): browse and inspect only",
+                      bad=True)
+            return
+        self.runner.mirror = sys.stdout.fileno()
         err = self.runner.start(app)
         if err:
+            self.runner.mirror = None
             self.note(err, bad=True)
             return
         note_run(app)
-        ip = lan_ip()
-        self.scr.nodelay(True)
-        last = 0
-        while True:
-            now = time.time()
-            if now - last > 0.12:
-                last = now
-                h, w = self.scr.getmaxyx()
-                self.scr.erase()
-                alive = self.runner.serving
-                head = f" running: {app.name} "
-                self.put(0, 0, head.ljust(w - 1),
-                         self.attr(C_HEAD if alive else C_WARN, True))
-                up = int(now - self.runner.started)
-                state = (f"● up {up//60:d}m{up%60:02d}s" if alive
-                         else f"exited, code {self.runner.proc.returncode}")
-                self.put(1, 1, state,
-                         self.attr(C_OK if alive else C_WARN, True))
-                url = self.runner.url
-                if not url and app.port:
-                    url = f"http://127.0.0.1:{app.port}"
-                if url:
-                    self.put(2, 1, url, self.attr(C_BAR, True))
-                    if ip and app.port:
-                        self.put(2, len(url) + 3,
-                                 f"(lan: http://{ip}:{app.port})",
-                                 self.attr(C_DIM))
-                self.hline(3)
-                body = h - 6
-                lines = list(self.runner.lines)[-body:]
-                for i, line in enumerate(lines):
-                    self.put(4 + i, 1, line[: w - 2], self.attr(C_NORM))
-                self.hline(h - 2)
-                tip = ("  Q  stop it and come back  "
-                       if alive else "  Q  back   (it has already exited)  ")
-                self.put(h - 1, 1, tip, self.attr(C_KEY, True))
-                self.scr.refresh()
+        curses.def_prog_mode()
+        curses.endwin()
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        port = live_port(app) or app.port
+        url = f"http://127.0.0.1:{port}" if port else ""
+        sys.stdout.write(f"\x1b[0m\x1b[7m running: {app.name} \x1b[0m  {url}\r\n"
+                         f"\x1b[2m Ctrl-C or Esc Esc stops it and comes back; "
+                         f"every other key goes to the app\x1b[0m\r\n\r\n")
+        sys.stdout.flush()
+
+        def winch(*_):
             try:
-                k = self.scr.getch()
-            except curses.error:
-                k = -1
-            if k in (ord("q"), ord("Q")):
-                break
-            if k == curses.KEY_RESIZE:
-                last = 0
-            time.sleep(0.05)
-        self.scr.nodelay(False)
-        if self.runner.serving:
-            h, w = self.scr.getmaxyx()
-            self.put(h - 1, 1, "  stopping...  ".ljust(w - 2),
-                     self.attr(C_WARN, True))
-            self.scr.refresh()
+                cols, rows = os.get_terminal_size()
+                fcntl.ioctl(self.runner.master, termios.TIOCSWINSZ,
+                            struct.pack("HHHH", rows, cols, 0, 0))
+                if self.runner.pgid:
+                    os.killpg(self.runner.pgid, signal.SIGWINCH)
+            except (OSError, ValueError):
+                pass
+
+        stopped = False
+        pending_esc = 0.0
+        try:
+            tty.setraw(fd)
+            signal.signal(signal.SIGWINCH, winch)
+            while self.runner.alive:
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if pending_esc and time.time() - pending_esc > 0.5:
+                    # a lone Esc, held back in case a second followed: it
+                    # did not, so it belongs to the app after all
+                    pending_esc = 0.0
+                    self._to_child(b"\x1b")
+                if not r:
+                    continue
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                if data == b"\x03" or (data == b"\x1b" and pending_esc):
+                    pending_esc = 0.0
+                    if self._ask_stop(app):
+                        stopped = True
+                        break
+                    continue
+                if data == b"\x1b":
+                    pending_esc = time.time()
+                    continue
+                if pending_esc:
+                    pending_esc = 0.0
+                    data = b"\x1b" + data
+                self._to_child(data)
+        finally:
+            signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if not stopped and self.runner.serving:
+            # the launcher left the terminal but a server of its is still
+            # up (night.commute starts one with nohup and exits)
+            sys.stdout.write("\r\n")
+            tty.setraw(fd)
+            try:
+                stopped = self._ask_stop(app, "is still serving")
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        self.runner.mirror = None
+        if stopped:
+            sys.stdout.write(f"\r\n stopping {app.name}...\r\n")
+            sys.stdout.flush()
             self.runner.stop()
+            curses.reset_prog_mode()
+            self.scr.clear()
+            self.scr.refresh()
             self.note(f"{app.name} stopped")
         else:
-            code = self.runner.proc.returncode if self.runner.proc else "?"
-            self.note(f"{app.name} had already exited (code {code})",
-                      bad=(code not in (0, None)))
+            curses.reset_prog_mode()
+            self.scr.clear()
+            self.scr.refresh()
+            if self.runner.serving:
+                self.note(f"{app.name} left serving; q or Enter on it to stop")
+            else:
+                code = self.runner.proc.returncode if self.runner.proc else "?"
+                self.note(f"{app.name} exited (code {code})",
+                          bad=(code not in (0, None)))
+
+    def _to_child(self, data):
+        try:
+            os.write(self.runner.master, data)
+        except OSError:
+            pass
+
+    def _ask_stop(self, app, why="is running"):
+        """One line on the app's own screen, one key. Only y stops it."""
+        fd = sys.stdin.fileno()
+        sys.stdout.write(f"\r\n\x1b[0m\x1b[7m mamc: {app.name} {why}. "
+                         f"Stop it and come back? [y/N] \x1b[0m")
+        sys.stdout.flush()
+        try:
+            r, _, _ = select.select([fd], [], [], 30)
+            k = os.read(fd, 1) if r else b""
+        except OSError:
+            k = b""
+        if k in (b"y", b"Y"):
+            return True
+        sys.stdout.write("\r\n\x1b[2m (carrying on) \x1b[0m\r\n")
+        sys.stdout.flush()
+        return False
 
     # -- actions -----------------------------------------------------------
     def act_uninstall(self, app):
@@ -1670,6 +1982,7 @@ class UI:
             self.note("the trash is empty")
             return
         idx = 0
+        changed = False     # a restore or a delete: only then is a rescan owed
         self.scr.nodelay(False)
         while True:
             h, w = self.scr.getmaxyx()
@@ -1696,6 +2009,7 @@ class UI:
             elif k in (ord("r"), ord("R")) and slots:
                 slot, mf = slots[idx]
                 ok, bad = restore_slot(slot, mf)
+                changed = True
                 self.note(f"restored {len(ok)}" +
                           (f", {len(bad)} could not be" if bad else ""),
                           bad=bool(bad))
@@ -1709,12 +2023,17 @@ class UI:
                                 [f"{mf['name']}, {len(mf['items'])} pieces",
                                  "", "This one cannot be undone."]):
                     shutil.rmtree(slot, ignore_errors=True)
+                    changed = True
                     slots = list_trash()
                     idx = min(idx, max(0, len(slots) - 1))
                     self.note("gone for good")
                     if not slots:
                         break
-        self.reload()
+        # Looking at the trash changes nothing, so q comes straight back.
+        # Every close used to rescan the phone -- three to four silent
+        # seconds in which a second q quit the program (13.9.2026).
+        if changed:
+            self.reload()
 
     def act_info(self, app):
         lines = [app.name, ""]
@@ -1778,6 +2097,53 @@ class UI:
                 typed = typed[:-1]
             elif 32 <= k < 127 and len(typed) < limit:
                 typed += chr(k)
+
+    def act_open(self, app):
+        port = live_port(app) or (app.port if port_is_up(app.port) else None)
+        if not port:
+            self.note(f"{app.name} is not serving - Enter starts it", bad=True)
+            return
+        url = f"http://127.0.0.1:{port}"
+        how = open_page(url)
+        if how:
+            self.note(f"opened {url} ({how})")
+        else:
+            self.note(f"no way to open a browser here: {url}", bad=True)
+
+    def act_update(self):
+        """u: check, show installed -> available, wait for y, pull, restart.
+        Returns True when the program must restart on the new code."""
+        self.note("checking GitHub for a newer mamc...")
+        self.draw()
+        try:
+            info = check_update()
+        except UpdateError as e:
+            self.note(str(e), bad=True)
+            return False
+        have = f"v{info['installed']}" if info["installed"] else "unnumbered"
+        if info["up_to_date"]:
+            self.note(f"mamc {have} is the latest")
+            return False
+        behind = (f"  ({info['behind']} commits behind)"
+                  if info["behind"] else "")
+        if not self.confirm("update mamc",
+                            [f"installed   {have}",
+                             f"available   v{info['latest']}{behind}",
+                             "",
+                             "git pull --ff-only, then this program restarts"],
+                            danger=False):
+            self.note("update cancelled")
+            return False
+        self.note("updating...")
+        self.draw()
+        try:
+            msg = perform_update()
+        except UpdateError as e:
+            self.note(str(e), bad=True)
+            return False
+        self.note(msg + ", restarting")
+        self.draw()
+        return True
 
     def act_move(self, app):
         """Pick a folder for this app: an existing one, a standard one, or a
@@ -1910,13 +2276,15 @@ class UI:
                     self.run_screen(a)
             elif k in (ord("i"), ord("I"), ord("l"), ord("L"), ord("d"),
                        ord("D"), curses.KEY_F8, ord("!"), ord("f"), ord("F"),
-                       ord("c"), ord("C")) and self.current and \
+                       ord("c"), ord("C"), ord("o"), ord("O")) and self.current and \
                     not self.current_app:
                 self.note("that is a folder - enter opens it", bad=True)
             elif k in (ord("i"), ord("I")) and self.current_app:
                 self.act_info(self.current_app)
             elif k in (ord("l"), ord("L")) and self.current_app:
                 self.act_log(self.current_app)
+            elif k in (ord("o"), ord("O")) and self.current_app:
+                self.act_open(self.current_app)
             elif k in (ord("d"), ord("D"), curses.KEY_F8) and self.current_app:
                 self.act_uninstall(self.current_app)
             elif k in (ord("c"), ord("C")) and self.current_app:
@@ -1932,6 +2300,11 @@ class UI:
                 save_important(IMPORTANT)
             elif k in (ord("t"), ord("T")):
                 self.act_trash()
+            elif k in (ord("u"), ord("U")):
+                if self.runner.alive:
+                    self.note("stop the running app first, then u", bad=True)
+                elif self.act_update():
+                    return "restart"
             elif k in (ord("r"), ord("R")):
                 name = self.current.name if self.current else None
                 self.note("rescanning...")
@@ -1981,7 +2354,42 @@ def cli_restore():
         print(f"  FAILED    {p}  ({why})")
 
 
+def cli_update():
+    """The U key without the screen: check, print both numbers, ask, pull."""
+    try:
+        info = check_update()
+    except UpdateError as e:
+        print(f"mamc: {e}")
+        return 1
+    have = f"v{info['installed']}" if info["installed"] else "unnumbered"
+    print(f"installed  {have}")
+    print(f"available  v{info['latest']}"
+          + (f"  ({info['behind']} commits behind)" if info["behind"] else ""))
+    if info["up_to_date"]:
+        print("already the latest, nothing to do")
+        return 0
+    try:
+        answer = input("update? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer != "y":
+        print("nothing changed")
+        return 0
+    try:
+        print(perform_update())
+    except UpdateError as e:
+        print(f"mamc: {e}")
+        return 1
+    return 0
+
+
 def main():
+    if "--version" in sys.argv or "-V" in sys.argv:
+        v = installed_version()
+        print(f"mamc v{v}" if v else "mamc (unnumbered: no version.py beside it)")
+        return 0
+    if "--update" in sys.argv:
+        return cli_update()
     if "--list" in sys.argv or "-l" in sys.argv:
         return cli_list()
     if "--restore" in sys.argv:
@@ -1990,9 +2398,10 @@ def main():
         print(__doc__)
         return
     ui = None
+    outcome = None
 
     def run(scr):
-        nonlocal ui
+        nonlocal ui, outcome
         curses.curs_set(0)
         try:
             curses.set_escdelay(25)     # Esc is "back", not a prefix to wait on
@@ -2000,7 +2409,7 @@ def main():
             pass
         scr.keypad(True)
         ui = UI(scr)
-        ui.loop()
+        outcome = ui.loop()
 
     try:
         curses.wrapper(run)
@@ -2009,7 +2418,12 @@ def main():
     finally:
         if ui and ui.runner.alive:
             ui.runner.stop()
+    if outcome == "restart":
+        # the terminal is restored and nothing is running: the new code
+        # takes this pid, the way the keyring's r and u do
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)]
+                 + sys.argv[1:])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

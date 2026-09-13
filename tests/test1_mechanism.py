@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
@@ -268,6 +268,91 @@ for junk, want in (('{"/root/.a": "Mine"}', {"/root/.a": "Mine"}),
     check(f"load_categories on {junk[:22]!r}", m.load_categories(), want)
 os.remove(m.CATEGORIES_FILE)
 m.CATEGORIES_FILE = _saved
+
+
+print("the live port - ~/.mantra/ports/<command>, trusted only when it answers")
+import socket as _socket
+import shutil as _shutil
+_saved_dir = m.PORTS_DIR
+_reg = tempfile.mkdtemp(prefix="mamc-ports-")
+m.PORTS_DIR = _reg
+try:
+    check("no file -> None", m.registry_port("nothing"), None)
+    open(os.path.join(_reg, "good"), "w").write("8850\n")
+    check("a number is read", m.registry_port("good"), 8850)
+    open(os.path.join(_reg, "zero"), "w").write("0\n")
+    check("0 is not a port", m.registry_port("zero"), None)
+    open(os.path.join(_reg, "big"), "w").write("70000\n")
+    check("70000 is not a port", m.registry_port("big"), None)
+    open(os.path.join(_reg, "words"), "w").write("eight thousand\n")
+    check("words are not a port", m.registry_port("words"), None)
+    check("a command with a slash is refused", m.registry_port("../good"), None)
+    check("an empty command is refused", m.registry_port(""), None)
+    check("None is refused", m.registry_port(None), None)
+    srv = _socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    lp = srv.getsockname()[1]
+    open(os.path.join(_reg, "live"), "w").write(f"{lp}\n")
+    a = m.App("live", None); a.cmds = [("live", "/x")]
+    check("a line whose port answers is the live port", m.live_port(a), lp)
+    a2 = m.App("also", None); a2.cmds = [("also-update", "/x"), ("live", "/x")]
+    check("every command name of the app is tried", m.live_port(a2), lp)
+    srv.close()
+    time.sleep(0.2)
+    check("the same line once nothing answers is ignored", m.live_port(a), None)
+    a3 = m.App("none", None)
+    check("an app with no command has no live port", m.live_port(a3), None)
+finally:
+    m.PORTS_DIR = _saved_dir
+    _shutil.rmtree(_reg, ignore_errors=True)
+
+print("the version - one whole number, read by pattern, here and off origin")
+check("APP_VERSION = 12", m.read_version("APP_VERSION = 12\n"), 12)
+check("with a comment after it", m.read_version('"""doc"""\n\nAPP_VERSION = 7  # x\n'), 7)
+check("a dotted number is not one", m.read_version("APP_VERSION = 1.2\n"), None)
+check("no line -> None", m.read_version("VERSION = 3\n"), None)
+check("None -> None", m.read_version(None), None)
+_vd = tempfile.mkdtemp(prefix="mamc-ver-")
+check("a folder without version.py is unnumbered", m.installed_version(_vd), None)
+open(os.path.join(_vd, "version.py"), "w").write("APP_VERSION = 3\n")
+check("and numbered once it has one", m.installed_version(_vd), 3)
+check("a folder is not a checkout without .git and mamc/mamc.py", m.is_checkout(_vd), False)
+_shutil.rmtree(_vd, ignore_errors=True)
+check("this checkout has a version", isinstance(m.installed_version(), int), True)
+
+print("the update - against a GitHub on disk, one commit ahead")
+import fixture_repo
+tmp, bare, co = fixture_repo.make(latest=1)
+_env_before = dict(os.environ)
+try:
+    fixture_repo.apply_env(tmp, co)
+    check("the fixture checkout is a checkout", m.is_checkout(co), True)
+    check("it is unnumbered", m.installed_version(co), None)
+    info = m.check_update(co)
+    check("check: installed unnumbered", info["installed"], None)
+    check("check: latest is 1", info["latest"], 1)
+    check("check: one commit behind", info["behind"], 1)
+    check("check: not up to date", info["up_to_date"], False)
+    check("checking moved nothing", m.installed_version(co), None)
+    msg = m.perform_update(co)
+    check("update says the new number", "v1" in msg, True)
+    check("after the pull the checkout is v1", m.installed_version(co), 1)
+    info = m.check_update(co)
+    check("and a second check is up to date", info["up_to_date"], True)
+    check("the link step wrote the fixture's wrapper, not the real one",
+          os.path.exists(os.path.join(tmp, "bin", "mamc")), True)
+    check("the fixture wrapper runs the fixture checkout",
+          co in open(os.path.join(tmp, "bin", "mamc")).read(), True)
+    real = "/data/data/com.termux/files/usr/bin/mamc"
+    check("the real wrapper still runs the real checkout",
+          "/root/termux-tools/mamc/mamc.py" in open(real).read(), True)
+    try:
+        m.check_update(tmp)
+        check("a non-checkout raises a sentence", False, True)
+    except m.UpdateError as e:
+        check("a non-checkout raises a sentence", "not a git checkout" in str(e), True)
+finally:
+    os.environ.clear(); os.environ.update(_env_before)
+    _shutil.rmtree(tmp, ignore_errors=True)
 
 print(f"\n{count} assertions, {len(fails)} failures")
 for f in fails:

@@ -30,13 +30,13 @@ def check(label, ok, detail=""):
 
 
 class UI:
-    def __init__(self, rows=40, cols=100):
+    def __init__(self, rows=40, cols=100, env=None):
         self.m, s = pty.openpty()
         fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.p = subprocess.Popen(
             ["bash", "/data/data/com.termux/files/usr/bin/mamc"],
             stdin=s, stdout=s, stderr=s, close_fds=True,
-            env=dict(os.environ, TERM="xterm-256color"))
+            env=dict(env or os.environ, TERM="xterm-256color"))
         os.close(s)
         self.buf = b""
         self.vt = Screen(rows, cols)
@@ -234,17 +234,70 @@ check("backspace clears the filter and the list is back", u.expect("most-run fir
 u.clear(); u.send(b"/"); u.send(b"tpedit"); u.send(b"\n", 1.0)
 check("the filter still works afterwards", u.expect("1 apps match", 12) and u.on_screen("tpedit"), repr(u.screen()[:300]))
 
-print("running an app with Enter, and stopping it with Q")
+print("the run screen is the app's terminal: every key reaches the app")
+# a fixture that says which key it got, the way maha.commute's menu reads 1,
+# Enter and the arrows. import http.server is what makes discovery see it.
+ECHO = os.path.expanduser("~/.zz_echo")
+os.makedirs(ECHO, exist_ok=True)
+open(os.path.join(ECHO, "app.py"), "w").write(
+    "import sys, os, termios, tty\n"
+    "import http.server  # noqa: F401  (discovery looks for a server)\n"
+    "PORT = 9097\n"
+    "print('echo app: serving on http://127.0.0.1:9097', flush=True)\n"
+    "fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)\n"
+    "try:\n"
+    "    while True:\n"
+    "        b = os.read(fd, 8)\n"
+    "        if b in (b'\\x1b[A', b'\\x1bOA'): name = 'up'\n"
+    "        elif b in (b'\\r', b'\\n'): name = 'enter'\n"
+    "        elif b == b'\\x1b': name = 'esc'\n"
+    "        else: name = b.decode('utf-8', 'replace')\n"
+    "        sys.stdout.write('key=%s\\r\\n' % name); sys.stdout.flush()\n"
+    "        if b == b'0': break\n"
+    "finally:\n"
+    "    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n"
+    "print('bye', flush=True)\n")
+u.clear(); u.send(b"\x1b", 0.5); u.send(b"r", 6.0)
+u.clear(); u.send(b"/"); u.send(b"zz_echo"); u.send(b"\n", 1.5)
+check("the fixture is listed after a rescan", u.expect("zz_echo", 12))
+u.clear(); u.send(b"\n", 4.0)
+check("the run screen appears", u.expect("running: zz_echo", 25))
+check("it shows the url", u.expect("http://127.0.0.1:9097", 20))
+check("it says how to stop", u.expect("stops it and comes back", 10))
+u.clear(); u.send(b"5", 1.0)
+check("a number reaches the app", u.expect("key=5", 8))
+u.clear(); u.send(b"\x1b[A", 1.0)
+check("an arrow reaches the app", u.expect("key=up", 8))
+u.clear(); u.send(b"\r", 1.0)
+check("Enter reaches the app", u.expect("key=enter", 8))
+u.clear(); u.send(b"\x1b", 1.2)
+check("a lone Esc reaches the app, after the chord window", u.expect("key=esc", 8))
+u.clear(); os.write(u.m, b"\x1b"); time.sleep(0.15); u.send(b"\x1b", 1.0)
+check("Esc Esc asks before stopping", u.expect("Stop it and come back? [y/N]", 8))
+u.clear(); u.send(b"n", 1.0)
+check("n carries on", u.expect("carrying on", 8))
+u.clear(); u.send(b"7", 1.0)
+check("and keys still reach the app afterwards", u.expect("key=7", 8))
+u.clear(); u.send(b"\x03", 1.0)
+check("Ctrl-C (the CR.C key) asks too", u.expect("Stop it and come back? [y/N]", 8))
+u.clear(); u.send(b"y", 3.0)
+check("y stops it and comes back to the list", u.expect("zz_echo stopped", 15))
+check("the list is back", u.expect("apps", 10))
+u.clear(); u.send(b"\n", 4.0)
+check("it runs again", u.expect("running: zz_echo", 25))
+u.clear(); u.send(b"0", 3.0)
+check("an app that quits on its own key brings the list back",
+      u.expect("exited (code 0)", 15))
+
+print("stopping a real app with Ctrl-C, y")
+u.clear(); u.send(b"\x1b", 0.5); u.send(b"/"); u.send(b"tpedit"); u.send(b"\n", 1.0)
 u.clear(); u.send(b"\n", 8.0)
-s = u.screen()
-check("the run screen appears", u.expect("running:", 25))
+check("tpedit's run screen appears", u.expect("running:", 25))
 check("it shows a url", u.expect("http://", 20))
-check("it offers Q to stop", u.expect("stop it", 10, lower=True))
-before = subprocess.run(["pgrep", "-fc", "tpedit"], capture_output=True,
-                        text=True).stdout.strip()
-u.clear(); u.send(b"Q", 3.0)
-s = u.screen()
-check("Q returns to the list", u.expect("apps", 15))
+u.clear(); u.send(b"\x03", 1.5)
+check("Ctrl-C asks", u.expect("[y/N]", 10))
+u.clear(); u.send(b"y", 3.0)
+check("y returns to the list", u.expect("stopped", 15))
 time.sleep(1)
 left = subprocess.run(["pgrep", "-f", "tpedit/app.py"], capture_output=True,
                       text=True).stdout.strip()
@@ -285,10 +338,77 @@ flags = json.load(open(os.path.expanduser("~/.mamc/important.json")))
 check("the flag is removed from disk", not any("openrouter" in k for k in flags))
 
 print("the trash view")
+# The first version of this check matched the word "trash" in the key bar and
+# passed with an EMPTY trash, where t only says "the trash is empty" and the
+# q that followed quit the program; every check after it ran against a dead
+# process and seven of them failed for no fault of the code (13.9.2026,
+# checking-the-checks.md). So a slot is put in the trash first, and the check
+# wants a line only the trash screen draws.
+import importlib.util
+_spec = importlib.util.spec_from_file_location("mamc_t2", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
+_m = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m)
+_m.trash_app(_m.App("zz_t2_ghost", None))
 u.clear(); u.send(b"t", 1.5)
-s = u.screen()
-check("t opens the trash", u.expect("trash", 12, lower=True))
-u.send(b"q", 1.0)
+check("t opens the trash", u.expect("r restore   x delete for good", 12))
+check("and the slot is listed", u.expect("zz_t2_ghost", 12))
+u.clear(); u.send(b"q", 1.0)
+check("q closes the trash at once, and not the program",
+      u.expect("apps match", 5) and u.p.poll() is None, repr(u.screen()[:200]))
+for _slot, _mf in _m.list_trash():
+    if _mf["name"] == "zz_t2_ghost":
+        import shutil as _sh2; _sh2.rmtree(_slot, ignore_errors=True)
+
+print("the live port: a keyring on 8850 says so in ~/.mantra/ports")
+import signal
+km, ks = pty.openpty()
+fcntl.ioctl(ks, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 90, 0, 0))
+kr = subprocess.Popen(["python3", "/root/KEYRING_TERMUX/app.py", "8850"],
+                      stdin=ks, stdout=ks, stderr=ks, close_fds=True,
+                      start_new_session=True, env=dict(os.environ, TERM="xterm-256color"))
+os.close(ks)
+REG = os.path.expanduser("~/.mantra/ports/keyring")
+end_t = time.time() + 20
+while time.time() < end_t:
+    try:
+        if open(REG).read().strip() == "8850":
+            break
+    except OSError:
+        pass
+    time.sleep(0.3)
+check("the keyring wrote 8850 to the registry", os.path.exists(REG) and open(REG).read().strip() == "8850")
+u.clear(); u.send(b"\x1b", 0.5); u.send(b"r", 6.0)
+u.clear(); u.send(b"/"); u.send(b"keyring"); u.send(b"\n", 1.5)
+check("the row shows the LIVE port, not the one in its source", u.expect("8850", 12), repr(u.screen()[:400]))
+check("the detail pane says it is serving there", u.expect("serving on 8850", 12))
+check("and offers o", u.expect("o opens it", 12))
+os.killpg(os.getpgid(kr.pid), signal.SIGTERM)
+time.sleep(1.5)
+# a second / keeps the text already typed, so the old filter is backspaced away first
+u.clear(); u.send(b"r", 6.0); u.send(b"/"); u.send(b"\x7f" * 14); u.send(b"keyring"); u.send(b"\n", 1.5)
+check("once it is gone, the stale line is not believed", not u.on_screen("8850") and u.expect("8842", 12),
+      repr(u.screen()[:400]))
+try:
+    os.close(km)
+except OSError:
+    pass
+u.clear(); u.send(b"\n", 6.0)
+check("the keyring runs from mamc", u.expect("running: KEYRING_TERMUX", 25))
+end_t = time.time() + 20
+while time.time() < end_t:
+    try:
+        if open(REG).read().strip() == "8842":
+            break
+    except OSError:
+        pass
+    time.sleep(0.3)
+check("and announces 8842 while mamc is its terminal", os.path.exists(REG) and open(REG).read().strip() == "8842")
+check("its own console draws on mamc's screen", u.expect("quit", 15, lower=True))
+u.clear(); u.send(b"\x03", 1.5); u.send(b"y", 4.0)
+check("stopped from mamc", u.expect("stopped", 15))
+import socket as _socket
+_s = _socket.socket(); _s.settimeout(0.5)
+check("nothing answers on 8842 afterwards", _s.connect_ex(("127.0.0.1", 8842)) != 0)
+_s.close()
 
 print("quitting")
 u.clear(); u.send(b"q", 2.0)
@@ -297,6 +417,40 @@ check("q exits the program", u.p.poll() is not None, f"rc={u.p.poll()}")
 check("it exited cleanly", u.p.poll() == 0, f"rc={u.p.poll()}")
 check("no traceback anywhere in the session", "Traceback" not in u.text)
 u.close()
+import shutil as _shutil
+_shutil.rmtree(ECHO, ignore_errors=True)
+
+print("the U key, against a GitHub on disk one version ahead")
+import fixture_repo
+FIX_TMP, FIX_BARE, FIX_CO = fixture_repo.make(latest=1)
+REAL_WRAPPER = open("/data/data/com.termux/files/usr/bin/mamc").read()
+try:
+    u2 = UI(env=fixture_repo.env_for(FIX_TMP, FIX_CO))
+    check("an unnumbered checkout draws no version in the title",
+          u2.on_screen("mamc —") and not u2.on_screen("mamc v"), repr(u2.screen()[:120]))
+    u2.clear(); u2.send(b"u", 3.0)
+    check("u shows what is installed", u2.expect("installed   unnumbered", 15))
+    check("and what is available", u2.expect("available   v1", 15))
+    u2.clear(); u2.send(b"n", 1.5)
+    check("n cancels", u2.expect("update cancelled", 10))
+    check("and nothing moved", not os.path.exists(os.path.join(FIX_CO, "version.py")))
+    u2.clear(); u2.send(b"u", 3.0)
+    check("u asks again", u2.expect("available   v1", 15))
+    u2.clear(); u2.send(b"y", 6.0)
+    check("y pulls and restarts", u2.expect("restarting", 20))
+    check("the restarted program is v1", u2.expect("mamc v1", 25), repr(u2.screen()[:120]))
+    check("the checkout is v1 on disk", os.path.exists(os.path.join(FIX_CO, "version.py")))
+    check("the link step wrote the fixture's wrapper",
+          os.path.exists(os.path.join(FIX_TMP, "bin", "mamc")))
+    check("the real wrapper is untouched",
+          open("/data/data/com.termux/files/usr/bin/mamc").read() == REAL_WRAPPER)
+    u2.clear(); u2.send(b"q", 2.0)
+    time.sleep(1)
+    check("q exits the restarted program cleanly", u2.p.poll() == 0, f"rc={u2.p.poll()}")
+    check("no traceback in that session", "Traceback" not in u2.text)
+    u2.close()
+finally:
+    _shutil.rmtree(FIX_TMP, ignore_errors=True)
 
 print(f"\n{count} checks, {len(fails)} failures")
 for f in fails:

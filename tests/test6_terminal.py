@@ -8,7 +8,7 @@ detected as tui, and mamc must hand it the terminal and get it back.
 """
 import importlib.util, os, shutil, subprocess, sys, time
 import pty, fcntl, termios, struct, select, re
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 HOME = m.HOME; fails = []
 def check(label, ok, d=""):

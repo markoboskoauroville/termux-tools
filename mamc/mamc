@@ -1,3 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # mamc - browse, run and uninstall the apps on this phone.
-exec python3 "$HOME/.mamc/mamc.py" "$@"
+# Runs the mamc.py beside this file; install-termux.sh writes the copy on the PATH with the
+# checkout's absolute path, so a git pull is the update.
+exec python3 "$(dirname "$(readlink -f "$0")")/mamc.py" "$@"

@@ -3,26 +3,33 @@
 Three programs built on the phone, inside Termux + PRoot.
 
     mamc      a Midnight Commander for every app on this phone, in folders:
-              open one, run an app, stop it with Q, move it with c, uninstall
-              it into a restorable trash
+              open one, run an app (the run screen is its terminal: every key
+              reaches it; Ctrl-C or Esc Esc stops it), o opens its page in
+              Chrome, c moves it, d uninstalls it into a restorable trash,
+              u updates mamc itself from GitHub
     talk      Claude's replies spoken aloud in Beatrice's voice, on a code word
     ccnotify  a notification when Claude stops or needs you, with a button
               that pushes "continue" into the session from the lock screen
 
 The environment they were built in, and everything it does differently, is
 `modules/termux-proot-working.md` in MANTRA_MANIFEST. Read that first if
-anything here behaves strangely.
+anything here behaves strangely. `HANDOVER.md` is the finished state.
 
-## Install
+## How to install
 
 ```bash
-install -m 755 mamc/mamc.py  "$HOME/.mamc/mamc.py"
-install -m 755 mamc/mamc     "$PREFIX/bin/mamc"
-install -m 755 talker/*.py   "$HOME/.talker/"
-install -m 755 talker/talk   "$PREFIX/bin/talk"
-install -m 755 notify/ccnotify.py "$HOME/.ccnotify/ccnotify.py"
-install -m 755 notify/ccnotify notify/ccpush "$PREFIX/bin/"
+curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/install-termux.sh | bash
 ```
+
+It clones (or pulls) `~/termux-tools`, puts `mamc`, `talk`, `ccnotify` and
+`ccpush` on the PATH (`$PREFIX/bin` and `~/.local/bin`), and copies the talker
+and the notifier to `~/.talker` and `~/.ccnotify`, where the hooks below expect
+them. mamc runs from the checkout, so `u` in mamc (or `mamc --update`) is:
+fetch, "installed v1 → available v2", y, `git pull --ff-only`, the link step,
+restart. `mamc --version` prints the number in `version.py`.
+
+Needs `python3` and `git`; `mpv` for talk; Termux:API for the bubbles. Nothing
+else — all three are stdlib only.
 
 The talker and the notifier are hooks in `~/.claude/settings.json`:
 
@@ -41,11 +48,136 @@ which under PRoot it only does when told to: CLAUDE_CODE_TERMUX edition v9
 starts `claude --messaging-socket-path "$HOME/.claude/inbox/cc-$$.sock"`.
 `ccnotify status` says whether a session is reachable.
 
-Needs `python3`, `mpv` and Termux:API. Nothing else — all three are stdlib only.
+## The tests
+
+```bash
+python3 tests/test1_mechanism.py      # the mechanism, alone
+python3 tests/test2_ui.py             # inside the running app, on a pty, against real apps
+python3 tests/test3_ugly.py           # the ugly cases
+python3 tests/test4_upgrade.py        # the upgrade, over the install of the version before
+python3 tests/test6_terminal.py       # apps that need a terminal
+script -qec "python3 tests/test5_every_row.py" /dev/null     # every folder, every row
+python3 tests/g6_stress.py            # the monkey (mamc --no-run) and the soak
+python3 tests/test7_notify.py         # ccnotify on a real Claude session
+python3 tests/run_all.py              # the sweep: start and stop every app on the phone
+```
+
+One at a time: two pty programs on one phone at once is a load test nobody
+asked for. Test 2 starts the real keyring on 8850, so nothing else may be on it.
 
 ---
 
-# The delivery record
+# The delivery records
+
+**G9 of `delivery-gate.md`: what is being claimed, and what is not.** Newest first.
+
+## v1, 13.9.2026 (the afternoon): the run screen is a terminal, the live port, the U key, Chrome
+
+Recorded for mamc at 2429 lines, tests at 2748, version.py = 1.
+The morning's record follows below; this one adds to it and corrects nothing in it.
+
+### What was run, and what it found
+
+| | result |
+|---|---|
+| **Test 1** mechanism, alone | 143 assertions, pass (was 108) |
+| **Test 2** inside the running app, on a pty, a screen model | 96 checks over a real pty, pass (was 55): the run screen, the live port, the U key |
+| **Test 3** the ugly cases | 49 checks, pass (was 34) |
+| **Test 4** the upgrade, over the install of the version before | 33 checks, pass (was 25) |
+| **Test 5** every folder, every row | 6 folders, 25 apps drawn, pass (was 22 apps: the keyring, the cockpit and the finder were hidden) |
+| **Test 6** terminal handover | pass |
+| **G6** monkey (`--no-run`) + soak | 400 random keys under `--no-run`, 12 start/stop cycles, pass |
+| **KEYRING_TERMUX** tests, with the registry | 169 checks, four tests green (v2) |
+| **COCKPIT_TERMUX** tests, with the registry | 157 checks, four tests green (v3) |
+| **SHOP_FINDER** tests, with the registry | 129 checks, four tests green (v3) |
+| **the sweep** (`tests/run_all.py`) over every app | 21 of 24 start, serve and stop; the three that do not are the known ones (magem has no server.py, the old maha-transcribe collides on 8082, surgeon is a command that exits) |
+
+### mamc: what Marko found, and what the tests had not
+
+**The run screen swallowed the keyboard.** It showed the app's output with the
+colour stripped and answered one key, Q. Marko opened maha.commute's menu in it
+(`1 2 3 4 fill a quadrant, arrows move`) and could press nothing. It is a
+terminal now: mamc leaves curses, the child's bytes go to the screen as they
+are, every key goes to the child, and two gestures are mamc's own, asked about
+before acting: **Ctrl-C** (the `CR.C` key on his keyboard) and **Esc Esc**. A
+lone Esc is held half a second, then forwarded. Test 2 drives a fixture that
+names each key it receives (a number, an arrow, Enter, a lone Esc), refuses
+the stop with n, stops with y, and quits on its own key. Because keys now reach
+real apps, the monkey runs `mamc --no-run`: Enter on an app refuses, and
+`9wipe` in maha.commute is one keypress away otherwise.
+
+**Three of the newest apps were not in the list.** The keyring's wrapper says
+`/root/KEYRING_TERMUX/keyring` in full and the launcher scan knew three
+spellings of home, not four; the cockpit's wrapper runs a launcher *inside* its
+folder and was read as an orphan; mapool's folder is under `storage/`, which
+the home walk skips. All three are found now (Test 5 draws 25 apps, was 22).
+
+**The live port.** Every port-picking app writes `~/.mantra/ports/<command>`
+after `pick()` (portpick.announce, at the source and in the three copies) and
+mamc believes the line only if the port answers. Test 2 starts the real keyring
+on 8850 and reads 8850 off the row and the detail pane; kills it; reads 8842
+again; runs it from mamc and sees it announce 8842 while mamc is its terminal.
+
+**The version and the U key.** `version.py`, one whole number; `u` fetches
+origin/main, shows installed → available, asks, pulls with `--ff-only`, runs
+the installer's link step and restarts on the same pid. Tests 1, 2 and 3 use
+`tests/fixture_repo.py`, a GitHub on disk one commit ahead, so the update is
+pulled for real and never over the network; the ugly cases are an origin that
+is gone, a git that hangs (a fake `git` on the PATH, the deadline shortened),
+a `version.py` on origin with no number, a diverged checkout. Test 4 installs
+the version before for real (a copy in `~/.mamc` and a wrapper naming it),
+uses it, leaves it running, and runs the link step over it — in a bin and a
+home of the test's own (`TT_BIN`, `TT_LOCAL_BIN`, `TT_HOME`), never on the
+real PATH.
+
+**Chrome.** `o` opens the selected app's page, and every page opener in the
+four floor apps opens `termux-open-url URL com.android.chrome`, with a `pm`
+check and a `timeout` bound. Nine more apps on the phone were edited in their
+running files only (originals in `~/.mamc/gate-backups/chrome-20260913/`);
+their repositories still need the line, see `termux-ecosystem.md` §3b.
+
+**Two faults the suite had been hiding.** `t` on an empty trash only says so,
+and the check `expect("trash")` matched the key bar's word, so it passed; the
+`q` meant for the trash view then quit the program and seven checks ran against
+a dead process. And closing the trash view rescanned the whole phone, three to
+four silent seconds in which a second `q` quit the program: the rescan is now
+owed only after a restore or a delete. The check wants a line only the trash
+screen draws, with a slot put in the trash first (`checking-the-checks.md` 8b).
+
+**The source was behind its copies.** portpick's TIME_WAIT fix lived only in
+the keyring's copy and the opener's timeout bound only in the cockpit's; both
+are in the source now and pulled into every copy. `never-back-to-zero.md` §4
+has the line.
+
+### The gates
+
+| gate | verdict |
+|---|---|
+| G1 provenance | pass — this repository, the commit this record is in |
+| G2 secrets | pass — 0 key-shaped strings in the tree and in every commit of the history; no backup file was ever committed |
+| G3 analysis | pass — mamc, the tests and the four consoles compile with SyntaxWarning as error; pyflakes clean |
+| G4 dead code | pass — nothing new left unused |
+| G5 dead loops | pass — every git call has a deadline (25 s), the installer's link step 60 s, `pm` 10 s, the opener under `timeout -k 5 30`, the stop prompt 30 s |
+| G6 stress | 400 random keys under `--no-run`, 12 start/stop cycles, pass |
+| G7 budgets | mamc 2429 lines (was 2015); `mamc --list` cold 3 s |
+| G8 upgrade | pass — Test 4 as above, and the U key end to end in Test 2 |
+| G9 the record | this document |
+
+### What is NOT claimed
+
+* **The curl line on a phone that never had these programs.** This phone had
+  them; the link step is tested, the clone step is the next real install.
+* **The nine legacy apps open Chrome only until their next reinstall**: the
+  edit is in the running files, not in their repositories.
+* **The talker and the notifier are untouched** by this delivery except for
+  where the installer copies them from; Test 7 was not re-run.
+* **No other phone.** One device, one Android, one PRoot.
+* **A curses app under mamc still takes the real terminal** (`run_handover`),
+  unchanged: Ctrl-C and Esc Esc do not apply there; its own q is the way back.
+
+---
+
+# The delivery record of the morning
 
 **G9 of `delivery-gate.md`: what is being claimed, and what is not.**
 

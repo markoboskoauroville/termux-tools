@@ -18,7 +18,8 @@ import termios
 import time
 import pty
 
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
@@ -37,7 +38,7 @@ random.seed(20260912)
 KEYS = [b"j", b"k", b"\x1bOA", b"\x1bOB", b"i", b"l", b"t", b"r", b"/", b"\n",
         b"\x1b", b"\x7f", b"!", b"f", b"d", b"n", b"a", b"z", b"0",
         b"\x03", b" ", b"\t", b"\x1b[5~", b"\x1b[6~", b"g", b"G",
-        b"\x1bOD", b"c", b"h"]
+        b"\x1bOD", b"c", b"h", b"u", b"\x1b\x1b", b"1", b"9"]
 # No q and no Q. Both quit, by design -- a monkey that presses quit and then
 # reports "it exited" is reporting its own keystroke as a crash. And no y:
 # d then y uninstalls an ordinary app for real, and over 400 keys that pair
@@ -55,9 +56,15 @@ if os.path.isdir(TRASH):
     os.rename(TRASH, TRASH_ASIDE)
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 90, 0, 0))
-p = subprocess.Popen(["bash", "/data/data/com.termux/files/usr/bin/mamc"],
+# --no-run: the run screen is the app's terminal now, so a monkey that
+# pressed Enter on maha.commute and then 9 would have WIPED it. Enter still
+# opens folders; on an app it refuses, and that refusal is what is tested.
+# And u asks a GitHub on disk (tests/fixture_repo.py), never the network.
+import fixture_repo
+FIX_TMP, FIX_BARE, FIX_CO = fixture_repo.make(latest=1)
+p = subprocess.Popen(["bash", "/data/data/com.termux/files/usr/bin/mamc", "--no-run"],
                      stdin=slave, stdout=slave, stderr=slave,
-                     env=dict(os.environ, TERM="xterm-256color"))
+                     env=dict(fixture_repo.env_for(FIX_TMP, FIX_CO), TERM="xterm-256color"))
 os.close(slave)
 buf = b""
 
@@ -117,6 +124,9 @@ if alive:
         p.terminate()
         time.sleep(0.5)
 check("it still quits after all that", p.poll() is not None)
+check("--no-run never started anything: every app on the phone is still stoppable by nobody",
+      "running:" not in txt and "Stop it and come back" not in txt)
+import shutil as _sh; _sh.rmtree(FIX_TMP, ignore_errors=True)
 try:
     os.close(master)
 except OSError:

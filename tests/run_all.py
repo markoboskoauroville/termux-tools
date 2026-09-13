@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 

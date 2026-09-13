@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 HOME = m.HOME
@@ -211,6 +211,94 @@ try:
 finally:
     if orig_imp is not None:
         open(m.IMPORTANT_FILE, "w").write(orig_imp)
+
+
+print("THE REGISTRY, MISBEHAVING")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_saved_ports = m.PORTS_DIR
+_ugly = tempfile.mkdtemp(prefix="mamc-ugly-ports-")
+try:
+    m.PORTS_DIR = os.path.join(_ugly, "not-a-dir")
+    open(m.PORTS_DIR, "w").write("8842\n")
+    check("the registry folder is a FILE: no line, no crash", m.registry_port("keyring") is None)
+    m.PORTS_DIR = _ugly
+    open(os.path.join(_ugly, "huge"), "w").write("8" * 200000)
+    check("ENORMOUS: a 200 KB number is not a port", m.registry_port("huge") is None)
+    open(os.path.join(_ugly, "neg"), "w").write("-8842\n")
+    check("a negative number is not a port", m.registry_port("neg") is None)
+    open(os.path.join(_ugly, "empty"), "w").write("")
+    check("EMPTY: an empty file is no line", m.registry_port("empty") is None)
+    open(os.path.join(_ugly, "bin"), "wb").write(b"\x00\xff\xfe8842")
+    check("HOSTILE: binary garbage is no line", m.registry_port("bin") is None)
+    open(os.path.join(_ugly, "spaced"), "w").write("  8850  \n\n")
+    check("whitespace around the number is fine", m.registry_port("spaced") == 8850)
+    os.mkdir(os.path.join(_ugly, "adir"))
+    check("a directory where the file should be is no line", m.registry_port("adir") is None)
+    check("OUT OF ORDER: a line for a port nothing serves is ignored by live_port",
+          (lambda a: (setattr(a, "cmds", [("spaced", "/x")]) or m.live_port(a)))(m.App("s", None)) is None)
+finally:
+    m.PORTS_DIR = _saved_ports
+    shutil.rmtree(_ugly, ignore_errors=True)
+
+print("THE UPDATE, WHEN GITHUB IS NOT THERE")
+import fixture_repo
+_env_before = dict(os.environ)
+tmp, bare, co = fixture_repo.make(latest=1)
+try:
+    fixture_repo.apply_env(tmp, co)
+    # ABSENT: the origin is gone
+    shutil.rmtree(bare)
+    try:
+        m.check_update(co); check("ABSENT origin: raises", False)
+    except m.UpdateError as e:
+        check("ABSENT origin: a sentence, not a traceback", "could not reach" in str(e), str(e))
+    check("and nothing moved", m.installed_version(co) is None)
+    # NEVER ANSWERS: a git that hangs
+    fake = os.path.join(tmp, "fakebin"); os.makedirs(fake)
+    open(os.path.join(fake, "git"), "w").write("#!/bin/sh\nsleep 30\n")
+    os.chmod(os.path.join(fake, "git"), 0o755)
+    os.environ["PATH"] = fake + os.pathsep + os.environ["PATH"]
+    m.GIT_TIMEOUT = 2
+    t0 = time.time()
+    try:
+        m.check_update(co); check("NEVER ANSWERS: raises", False)
+    except m.UpdateError as e:
+        check("NEVER ANSWERS: gives up with a sentence", "did not answer" in str(e), str(e))
+    check("and within the deadline", time.time() - t0 < 6, f"{time.time() - t0:.1f}s")
+    m.GIT_TIMEOUT = 25
+    os.environ["PATH"] = _env_before["PATH"]
+finally:
+    os.environ.clear(); os.environ.update(_env_before)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# MALFORMED: origin's version.py has no number; TWICE: diverged so ff is impossible
+tmp, bare, co = fixture_repo.make(latest=1)
+try:
+    fixture_repo.apply_env(tmp, co)
+    work = os.path.join(tmp, "work")
+    open(os.path.join(work, "version.py"), "w").write("VERSION = 'two'\n")
+    subprocess.run(["git", "-C", work, "commit", "-q", "-am", "C: no number"], check=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"), timeout=30)
+    subprocess.run(["git", "-C", work, "push", "-q", "origin", "main"], check=True, timeout=30)
+    try:
+        m.check_update(co); check("MALFORMED version.py on origin: raises", False)
+    except m.UpdateError as e:
+        check("MALFORMED version.py on origin: a sentence", "no readable version.py" in str(e), str(e))
+    open(os.path.join(co, "local.txt"), "w").write("x\n")
+    subprocess.run(["git", "-C", co, "add", "local.txt"], check=True, timeout=30)
+    subprocess.run(["git", "-C", co, "commit", "-q", "-m", "local"], check=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"), timeout=30)
+    try:
+        m.perform_update(co); check("TWICE: a diverged checkout cannot fast-forward: raises", False)
+    except m.UpdateError as e:
+        check("TWICE: a diverged checkout says pull failed", "git pull failed" in str(e), str(e))
+    check("and the local commit is still there",
+          os.path.exists(os.path.join(co, "local.txt")))
+finally:
+    os.environ.clear(); os.environ.update(_env_before)
+    shutil.rmtree(tmp, ignore_errors=True)
 
 print(f"\n{count} checks, {len(fails)} failures")
 for f in fails:

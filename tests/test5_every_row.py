@@ -11,9 +11,10 @@ checking-the-checks.md means. Every row, every time.
 """
 import curses
 import importlib.util
+import os
 import sys
 
-spec = importlib.util.spec_from_file_location("mamc", "/root/.mamc/mamc.py")
+spec = importlib.util.spec_from_file_location("mamc", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mamc", "mamc.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
