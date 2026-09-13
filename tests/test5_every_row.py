@@ -22,26 +22,44 @@ def run(scr):
     ui = m.UI(scr)
     ui.reload()
     bad = []
-    for i in range(len(ui.filtered)):
+    # the first screen: every folder row
+    folders = list(ui.filtered)
+    for i, f in enumerate(folders):
         ui.idx = i
-        a = ui.filtered[i]
         try:
             ui.draw()
         except Exception as e:
-            bad.append((a.name, f"{type(e).__name__}: {e}"))
-        # and the pane the info key opens, built from the same object
-        try:
-            lines = [a.name]
-            if a.path:
-                lines.append(a.path)
-            [str(t) for t in a.targets()]
-        except Exception as e:
-            bad.append((a.name + " (info)", f"{type(e).__name__}: {e}"))
-    return bad, len(ui.filtered), [a.name for a in ui.filtered if a.path is None]
+            bad.append((f"[{f.name}]", f"{type(e).__name__}: {e}"))
+    # then inside every folder, every app row
+    apps_drawn, pathless = 0, []
+    for f in folders:
+        ui.open_folder(f)
+        for i in range(len(ui.filtered)):
+            ui.idx = i
+            a = ui.filtered[i]
+            apps_drawn += 1
+            if a.path is None:
+                pathless.append(a.name)
+            try:
+                ui.draw()
+            except Exception as e:
+                bad.append((a.name, f"{type(e).__name__}: {e}"))
+            # and the pane the info key opens, built from the same object
+            try:
+                lines = [a.name]
+                if a.path:
+                    lines.append(a.path)
+                [str(t) for t in a.targets()]
+            except Exception as e:
+                bad.append((a.name + " (info)", f"{type(e).__name__}: {e}"))
+        ui.close_folder()
+    if apps_drawn != len(ui.apps):
+        bad.append(("(count)", f"drew {apps_drawn} app rows but {len(ui.apps)} apps exist"))
+    return bad, len(folders), apps_drawn, pathless
 
 
-bad, n, pathless = curses.wrapper(run)
-print(f"drew every row: {n} apps")
+bad, nf, n, pathless = curses.wrapper(run)
+print(f"drew every row: {nf} folders, {n} apps")
 print(f"of which have no folder: {pathless or 'none'}")
 for name, err in bad:
     print(f"  FAIL {name}: {err}")

@@ -6,6 +6,7 @@
     ccnotify prompt       UserPromptSubmit hook: you are back, clear the bubbles
     ccnotify push TEXT    send TEXT into the running session, as if typed
     ccnotify status       which session is reachable, if any
+    ccnotify reap [S]     kill Termux:API calls left hanging longer than S s
 
 WHY. Claude Code runs in a terminal that is usually not on screen. When it
 finishes, or stops to ask for a permission, nothing on the phone says so, and
@@ -28,6 +29,8 @@ distro's (stdlib only).
 """
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -36,7 +39,11 @@ import time
 HOME = os.path.expanduser("~")
 TERMUX_HOME = "/data/data/com.termux/files/home"
 PREFIX = "/data/data/com.termux/files/usr"
-DIR = os.path.join(HOME, ".ccnotify")
+# CCNOTIFY_DIR: a test sets it so a session it starts announces itself
+# somewhere private. Without it, two sessions share one inbox.json and a
+# test's push lands in whichever session's hook fired last -- which, once,
+# was a person's live session rather than the one under test.
+DIR = os.environ.get("CCNOTIFY_DIR") or os.path.join(HOME, ".ccnotify")
 INBOX = os.path.join(DIR, "inbox.json")
 LOG_FILE = os.path.join(DIR, "ccnotify.log")
 CCPUSH = PREFIX + "/bin/ccpush"
@@ -150,9 +157,107 @@ def push(text, timeout=4.0):
 #  The bubbles
 # ---------------------------------------------------------------------------
 
-def notify(nid, title, content, buttons=(), ongoing=False):
+# A Termux:API call is a shell script that starts `termux-api`, which sends
+# the request to the Termux:API app over a socket and WAITS for the reply.
+# When the app has been swapped out or restarted, that reply never comes and
+# the wait never ends: on 13.9.2026 twelve of them sat at
+# __skb_wait_for_more_packets for a quarter of an hour, all children of pid 1,
+# all left by these hooks. Android 12+ counts every such process against the
+# app's phantom-process limit (32) and kills processes -- Claude Code's
+# among them -- when it is passed. So every call is bounded by `timeout`, and
+# every hook first reaps what an earlier call left behind.
+BOUND = 45          # seconds one Termux:API call may take before it is killed
+STALE = 120         # an orphaned termux-* process older than this is reaped
+CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+
+
+def bounded(argv):
+    """The same call, with a deadline. `timeout` becomes the group leader,
+    and on expiry signals the whole group: the script AND its termux-api."""
+    if shutil.which("timeout"):
+        return ["timeout", "-k", "5", str(BOUND)] + list(argv)
+    return list(argv)
+
+
+def spawn(argv):
     """Popen, never run: Termux:API takes seconds per call and a hook that
     waits for it holds up the prompt you wanted to type into."""
+    subprocess.Popen(bounded(argv), stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def is_termux_api_call(argv):
+    """A termux-* script, the termux-api helper it runs, or a `timeout`
+    wrapped around either. Never the wake lock: it is quick, and it is the
+    one Termux call that keeps this session alive."""
+    for part in argv:
+        base = os.path.basename(part)
+        if base == "termux-api" or (base.startswith("termux-")
+                                     and base not in ("termux-wake-lock",
+                                                      "termux-wake-unlock")):
+            return True
+    return False
+
+
+def now_since_boot():
+    """The clock /proc/<pid>/stat's starttime is on. NOT /proc/uptime:
+    proot-distro binds a fake one that reads about two minutes forever, and
+    an age computed from it came out as minus three hours (13.9.2026)."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):
+        with open("/proc/uptime") as fh:
+            return float(fh.read().split()[0])
+
+
+def orphans():
+    """Every visible process whose parent is pid 1: (pid, age_s, argv)."""
+    try:
+        uptime = now_since_boot()
+    except Exception:
+        return
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                stat = fh.read()
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [a.decode("utf-8", "replace")
+                        for a in fh.read().split(b"\0") if a]
+        except Exception:
+            continue
+        # the command name sits in parentheses and may contain spaces
+        fields = stat[stat.rfind(")") + 2:].split()
+        try:
+            ppid = int(fields[1])
+            started = int(fields[19]) / CLK_TCK
+        except (IndexError, ValueError):
+            continue
+        if ppid != 1:
+            continue
+        yield pid, uptime - started, argv
+
+
+def reap(stale=STALE, procs=None):
+    """Kill orphaned Termux:API calls older than `stale` seconds. Returns
+    the pids it signalled. `procs` lets a test hand in rows of its own."""
+    killed = []
+    for pid, age, argv in (orphans() if procs is None else procs):
+        if age < stale or not is_termux_api_call(argv):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if killed:
+        log(f"reaped {len(killed)} hung Termux:API call(s): {killed}")
+    return killed
+
+
+def notify(nid, title, content, buttons=(), ongoing=False):
     argv = ["termux-notification", "--id", nid, "--title", title,
             "--content", content[:200], "--priority", "high", "--alert-once",
             "--action", OPEN_TERMUX]
@@ -161,8 +266,7 @@ def notify(nid, title, content, buttons=(), ongoing=False):
     for i, (label, action) in enumerate(buttons[:3], start=1):
         argv += [f"--button{i}", label, f"--button{i}-action", action]
     try:
-        subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        spawn(argv)
         return True
     except Exception as e:
         log(f"notify failed: {e}")
@@ -172,9 +276,7 @@ def notify(nid, title, content, buttons=(), ongoing=False):
 def remove(*ids):
     for nid in ids:
         try:
-            subprocess.Popen(["termux-notification-remove", nid],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+            spawn(["termux-notification-remove", nid])
         except Exception:
             pass
 
@@ -240,6 +342,7 @@ def read_hook_input():
 def cmd_needs():
     data = read_hook_input()
     record_inbox()
+    reap()
     kind = data.get("notification_type") or ""
     msg = headline(data.get("message") or data.get("title") or kind or
                    "Claude is waiting for you")
@@ -263,6 +366,7 @@ def cmd_needs():
 def cmd_stopped():
     data = read_hook_input()
     record_inbox()
+    reap()
     if data.get("stop_hook_active"):
         return
     # The hook input carries the reply itself (last_assistant_message). The
@@ -285,6 +389,7 @@ def cmd_stopped():
 def cmd_prompt():
     read_hook_input()
     record_inbox()
+    reap()
     remove(ID_NEEDS, ID_STOPPED)
 
 
@@ -327,6 +432,9 @@ def main(argv):
         return cmd_push(argv[1:])
     elif cmd == "status":
         return cmd_status()
+    elif cmd == "reap":
+        killed = reap(stale=float(argv[1]) if len(argv) > 1 else STALE)
+        print(f"reaped {len(killed)}: {killed}" if killed else "nothing hung")
     elif cmd in ("-h", "--help", "help"):
         print(__doc__)
     else:

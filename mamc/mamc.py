@@ -35,6 +35,14 @@ flag or unflag whatever is selected.
 NOTHING IS DELETED. Uninstall MOVES every piece into ~/.mamc/trash with a
 manifest saying where each came from, so `mamc --restore` can put it back.
 Emptying the trash is a separate, explicit act.
+
+FOLDERS. Twenty apps is too many for one list, so the first screen is a
+handful of folders -- Commute, Transcribe & speech, Read & play, Tools -- and
+Enter opens one. Each app is filed by a keyword rule; press c to move it to
+another folder (or a new one), and that choice is kept in
+~/.mamc/categories.json against the app's path. The filter (/) searches
+across every folder at once, so a name you know is never more than a
+keystroke away.
 """
 
 import curses
@@ -67,6 +75,25 @@ TRASH = os.path.join(MAMC_DIR, "trash")
 LOG_DIR = os.path.join(MAMC_DIR, "logs")
 IMPORTANT_FILE = os.path.join(MAMC_DIR, "important.json")
 RUNS_FILE = os.path.join(MAMC_DIR, "runs.json")
+CATEGORIES_FILE = os.path.join(MAMC_DIR, "categories.json")
+
+# How an app is filed when nobody has said otherwise: the first rule whose
+# keywords appear in the app's name, command or folder name wins. The order
+# matters -- "maha-commute" is Commute, not Transcribe, because Commute is
+# asked first. A rule's words are matched as substrings, lowercase.
+FOLDER_RULES = [
+    ("Commute", ("commute",)),
+    ("Transcribe & speech", ("transcrib", "whisper", "tts", "stt", "speech",
+                             "voice", "talk")),
+    ("Read & play", ("reader", "maread", "player", "maplay", "spotify",
+                     "music", "play")),
+    ("Tools", ("edit", "finder", "shops", "pools", "router", "agent",
+               "claude", "tool")),
+]
+LOOSE_FOLDER = "Experiments"      # a loose .py sitting in $HOME
+OTHER_FOLDER = "Other"
+ORPHAN_FOLDER = "Orphans"
+FOLDER_NAME_MAX = 32
 
 # Directories in $HOME that are configuration, caches or toolchains. An app
 # never lives here, and walking .cargo looking for a Flask import is a way to
@@ -142,6 +169,94 @@ def save_important(d):
     with open(tmp, "w") as fh:
         json.dump(d, fh, indent=2, sort_keys=True)
     os.replace(tmp, IMPORTANT_FILE)
+
+
+# ---------------------------------------------------------------------------
+#  Folders
+#
+#  A folder is a name and the apps filed under it. Nothing on disk is a
+#  folder: the rules above file every app, and categories.json holds only
+#  the exceptions you made by hand, keyed the same way as the important flag
+#  -- by the app's path, which survives a rename.
+# ---------------------------------------------------------------------------
+
+CATEGORIES = {}
+
+
+def clean_folder_name(name):
+    """One line, trimmed, bounded. A folder called '' or '\n' or a paragraph
+    is not a folder; it is a way to draw nothing or to draw over the pane."""
+    if not isinstance(name, str):
+        return ""
+    name = " ".join(name.split())
+    return name[:FOLDER_NAME_MAX]
+
+
+def load_categories():
+    try:
+        with open(CATEGORIES_FILE) as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        v = clean_folder_name(v)
+        if isinstance(k, str) and k and v:
+            out[k] = v
+    return out
+
+
+def save_categories(d):
+    os.makedirs(MAMC_DIR, exist_ok=True)
+    tmp = CATEGORIES_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(d, fh, indent=2, sort_keys=True)
+    os.replace(tmp, CATEGORIES_FILE)
+
+
+def default_folder(app):
+    if app.orphan:
+        return ORPHAN_FOLDER
+    hay = " ".join([app.name, app.cmd or "",
+                    os.path.basename(app.path or "")]).lower()
+    for folder, words in FOLDER_RULES:
+        if any(w in hay for w in words):
+            return folder
+    if app.loose:
+        return LOOSE_FOLDER
+    return OTHER_FOLDER
+
+
+def folder_of(app, overrides=None):
+    overrides = CATEGORIES if overrides is None else overrides
+    return overrides.get(app.ident) or default_folder(app)
+
+
+class Folder:
+    """A row on the first screen. Its numbers are its apps' numbers added
+    up, so the folder you live in floats to the top the way an app does."""
+
+    def __init__(self, name, apps):
+        self.name = name
+        self.apps = apps
+        self.runs = sum(a.runs for a in apps)
+        self.last_run = max((a.last_run for a in apps), default=0)
+        self.orphan = (name == ORPHAN_FOLDER)
+
+    @property
+    def size(self):
+        return sum(a.size for a in self.apps if a.path)
+
+
+def group_folders(apps):
+    by = {}
+    for a in apps:
+        by.setdefault(a.folder, []).append(a)
+    out = [Folder(name, members) for name, members in by.items()]
+    out.sort(key=lambda f: (f.orphan, -f.runs, f.name.lower()))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +601,7 @@ class App:
         self.launcher_text = None   # its launcher, for port sniffing
         self.runs = 0               # how often it has been started
         self.last_run = 0
+        self.folder = OTHER_FOLDER  # set by discover()
         self._size = None
 
     @property
@@ -611,8 +727,9 @@ class App:
 
 
 def discover():
-    global IMPORTANT
+    global IMPORTANT, CATEGORIES
     IMPORTANT = load_important()
+    CATEGORIES = load_categories()
     descriptors = read_ma_descriptors()
     launchers = scan_launchers()
     homes = scan_home()
@@ -717,6 +834,9 @@ def discover():
         theirs, their_last = ma_stat_runs(a.desc)
         a.runs = max(int(mine.get("count", 0)), theirs)
         a.last_run = max(float(mine.get("last", 0)), float(their_last))
+
+    for a in apps.values():
+        a.folder = folder_of(a)
 
     # Most-run first. Orphans always last -- they cannot be run at all, and
     # they are here to be cleared, not chosen.
@@ -876,7 +996,7 @@ class Runner:
         return None
 
     def _pump(self):
-        proc, out, partial = self.proc, [], b""
+        out, partial = [], b""
         master = self.master
         while True:
             try:
@@ -1001,6 +1121,8 @@ class UI:
         self.idx = 0
         self.top = 0
         self.filter = ""
+        self.folder = None          # None: the first screen, the folders
+        self.folders = []
         self.msg = ""
         self.msg_bad = False
         self.runner = Runner()
@@ -1033,6 +1155,10 @@ class UI:
     # -- data --------------------------------------------------------------
     def reload(self, keep_name=None):
         self.apps = discover()
+        self.folders = group_folders(self.apps)
+        if self.folder is not None and \
+                not any(f.name == self.folder for f in self.folders):
+            self.folder = None      # its last app moved out, or was removed
         self.apply_filter()
         if keep_name:
             for i, a in enumerate(self.filtered):
@@ -1041,15 +1167,53 @@ class UI:
                     break
 
     def apply_filter(self):
+        """What the list shows: folders at the top level, an open folder's
+        apps inside it -- and while a filter is typed, every app that
+        matches, from every folder, because a name you know should never
+        need the right folder opened first."""
         f = self.filter.lower()
-        self.filtered = [a for a in self.apps
-                         if not f or f in a.name.lower()
-                         or (a.cmd and f in a.cmd.lower())]
-        self.idx = min(self.idx, max(0, len(self.filtered) - 1))
+        if f:
+            self.filtered = [a for a in self.apps
+                             if f in a.name.lower()
+                             or (a.cmd and f in a.cmd.lower())
+                             or f in a.folder.lower()]
+        elif self.folder is None:
+            self.filtered = list(self.folders)
+        else:
+            self.filtered = next((fo.apps for fo in self.folders
+                                  if fo.name == self.folder), [])
+        self.clamp()
+
+    def clamp(self):
+        """idx and top always name a row that exists. min(len - 1, idx + 1)
+        on an EMPTY list is -1, and filtered[-1] of nothing raises: the
+        monkey found it by typing a filter that matched no app and pressing
+        Down. Every navigation key and every redraw goes through here."""
+        last = max(0, len(self.filtered) - 1)
+        self.idx = max(0, min(self.idx, last))
+        self.top = max(0, min(self.top, last))
 
     @property
     def current(self):
         return self.filtered[self.idx] if self.filtered else None
+
+    @property
+    def current_app(self):
+        a = self.current
+        return a if isinstance(a, App) else None
+
+    def open_folder(self, folder):
+        self.folder = folder.name
+        self.idx = 0
+        self.top = 0
+        self.apply_filter()
+
+    def close_folder(self):
+        name, self.folder = self.folder, None
+        self.top = 0
+        self.apply_filter()
+        self.idx = next((i for i, f in enumerate(self.filtered)
+                         if f.name == name), 0)
 
     # -- panes -------------------------------------------------------------
     def draw(self):
@@ -1065,13 +1229,20 @@ class UI:
             self.put(0, max(0, w - 1 - len(running)), running,
                      self.attr(C_HEAD, True))
 
-        self.put(1, 0, f" {len(self.filtered)} apps, most-run first",
-                 self.attr(C_DIM))
         if self.filter:
-            self.put(1, 12, f"filter: {self.filter}_", self.attr(C_BAR, True))
+            self.put(1, 0, f" {len(self.filtered)} apps match",
+                     self.attr(C_DIM))
+            self.put(1, 16, f"filter: {self.filter}_", self.attr(C_BAR, True))
+        elif self.folder is None:
+            self.put(1, 0, f" {len(self.filtered)} folders, {len(self.apps)} "
+                           f"apps, most-run first", self.attr(C_DIM))
+        else:
+            self.put(1, 0, f" ◂ {self.folder}: {len(self.filtered)} apps, "
+                           f"most-run first   (← back)", self.attr(C_BAR, True))
         self.hline(2)
 
         list_h = h - 6
+        self.clamp()
         if self.idx < self.top:
             self.top = self.idx
         if self.idx >= self.top + list_h:
@@ -1084,16 +1255,28 @@ class UI:
                 break
             a = self.filtered[i]
             sel = (i == self.idx)
-            mark = "!" if a.important else ("R" if a.registered else " ")
-            if a.orphan:
-                badge, ba = "orphan", C_WARN
-            elif a.tui:
-                badge, ba = "tui", C_BAR
-            elif port_is_up(a.port):
-                badge, ba = "up", C_OK
+            folder = isinstance(a, Folder)
+            if folder:
+                mark = "▸"
+                badge, ba = ("orphan", C_WARN) if a.orphan else ("", C_DIM)
+                size = human(a.size)
+                cmdtxt = f"{len(a.apps)} apps"
+                porttxt = ""
+                important = False
             else:
-                badge, ba = "", C_DIM
-            size = human(a.size) if a.path else "-"
+                mark = "!" if a.important else ("R" if a.registered else " ")
+                if a.orphan:
+                    badge, ba = "orphan", C_WARN
+                elif a.tui:
+                    badge, ba = "tui", C_BAR
+                elif port_is_up(a.port):
+                    badge, ba = "up", C_OK
+                else:
+                    badge, ba = "", C_DIM
+                size = human(a.size) if a.path else "-"
+                cmdtxt = a.cmd or "-"
+                porttxt = str(a.port or "-")
+                important = a.important
             runs = f"{a.runs}\u00d7" if a.runs else ""
             # Build the row to FIT the pane rather than formatting a fixed
             # 57-character line and letting the truncation decide what
@@ -1121,16 +1304,18 @@ class UI:
             # simply was not there.
             for kind, cw in cells:
                 if kind == "cmd":
-                    row += f" {(a.cmd or '-')[:cw]:{cw}}"
+                    row += f" {cmdtxt[:cw]:{cw}}"
                 elif kind == "port":
-                    row += f" {str(a.port or '-'):>{cw}}"
+                    row += f" {porttxt:>{cw}}"
                 else:
                     row += f" {size:>{cw}}"
             line = row + f" {runs:>4} "
             if sel:
-                attr = self.attr(C_IMPSEL if a.important else C_SEL, True)
+                attr = self.attr(C_IMPSEL if important else C_SEL, True)
+            elif important:
+                attr = self.attr(C_IMP, True)
             else:
-                attr = self.attr(C_IMP, True) if a.important else self.attr(C_NORM)
+                attr = self.attr(C_NORM, folder)
             self.put(y, 0, line.ljust(split - 1)[: split - 1], attr)
             if badge and not sel:
                 self.put(y, split - 1 - len(badge) - 1, badge, self.attr(ba, True))
@@ -1143,15 +1328,26 @@ class UI:
         self.draw_detail(split + 1, 3, w - split - 2, list_h)
 
         self.hline(h - 3)
+        at_root = self.folder is None and not self.filter
         if self.msg:
             self.put(h - 2, 1, self.msg[: w - 2],
                      self.attr(C_WARN if self.msg_bad else C_OK, True))
+        elif at_root:
+            self.put(h - 2, 1,
+                     "↑↓ move   enter open   / filter every folder   "
+                     "t trash   r rescan", self.attr(C_DIM))
         else:
             self.put(h - 2, 1,
                      "↑↓ move   enter run   i info   l log   "
-                     "d uninstall   ! flag   r rescan", self.attr(C_DIM))
-        keys = [("enter", "run"), ("d", "uninstall"), ("!", "flag"),
-                ("t", "trash"), ("/", "filter"), ("q", "quit")]
+                     "d uninstall   c move   ! flag   ← back",
+                     self.attr(C_DIM))
+        if at_root:
+            keys = [("enter", "open"), ("/", "filter"), ("t", "trash"),
+                    ("q", "quit")]
+        else:
+            keys = [("enter", "run"), ("d", "uninstall"), ("c", "move"),
+                    ("!", "flag"), ("←", "back"), ("/", "filter"),
+                    ("q", "quit")]
         x = 1
         for k, label in keys:
             if x + len(k) + len(label) + 3 > w:
@@ -1168,6 +1364,22 @@ class UI:
             self.put(y, x, "nothing here", self.attr(C_DIM))
             return
         rows = []
+        if isinstance(a, Folder):
+            rows.append((a.name, C_BAR, True))
+            rows.append((f"{len(a.apps)} apps   {human(a.size)}   "
+                         f"{a.runs} runs", C_DIM, False))
+            rows.append(("enter opens it", C_DIM, False))
+            rows.append(("", C_NORM, False))
+            for app in a.apps:
+                mark = "!" if app.important else " "
+                runs = f"{app.runs}\u00d7" if app.runs else ""
+                rows.append((f"{mark} {app.name[:max(1, w - 8)]:{max(1, w - 8)}}{runs:>5}",
+                             C_IMP if app.important else C_NORM, False))
+            for i, (text, color, bold) in enumerate(rows):
+                if i >= h:
+                    break
+                self.put(y + i, x, text[:w], self.attr(color, bold))
+            return
         rows.append((a.name, C_IMP if a.important else C_BAR, True))
         if a.important:
             rows.append(("IMPORTANT - asks twice before it goes", C_IMP, True))
@@ -1207,6 +1419,9 @@ class UI:
         rows.append((f"runs      {a.runs}"
                      + (f"   last {ago(a.last_run)}" if a.runs else ""),
                      C_OK if a.runs else C_DIM, False))
+        rows.append((f"folder    {a.folder}"
+                     + ("   (chosen with c)" if a.ident in CATEGORIES else ""),
+                     C_NORM, False))
         if a.registered:
             rows.append((f"ma        registered  ({a.desc['_id']})", C_OK, False))
             if a.desc.get("alias"):
@@ -1541,6 +1756,84 @@ class UI:
                 return
         self.note("no log yet", bad=True)
 
+    # -- moving an app to another folder ---------------------------------
+    def prompt_line(self, title, hint, limit=FOLDER_NAME_MAX):
+        """One line of typed text, or None on Esc."""
+        h, w = self.scr.getmaxyx()
+        typed = ""
+        self.scr.nodelay(False)
+        while True:
+            self.scr.erase()
+            self.put(0, 0, f" {title} ".ljust(w - 1), self.attr(C_HEAD, True))
+            self.put(2, 2, hint[: w - 4], self.attr(C_DIM))
+            self.put(4, 2, "> " + typed + "_", self.attr(C_BAR, True))
+            self.put(h - 2, 2, "enter = done,  esc = cancel", self.attr(C_DIM))
+            self.scr.refresh()
+            k = self.scr.getch()
+            if k == 27:
+                return None
+            if k in (10, 13, curses.KEY_ENTER):
+                return typed
+            if k in (curses.KEY_BACKSPACE, 127, 8):
+                typed = typed[:-1]
+            elif 32 <= k < 127 and len(typed) < limit:
+                typed += chr(k)
+
+    def act_move(self, app):
+        """Pick a folder for this app: an existing one, a standard one, or a
+        new name. The choice is kept by the app's path, like the flag."""
+        names = [f.name for f in self.folders if not f.orphan]
+        for n in [f for f, _ in FOLDER_RULES] + [OTHER_FOLDER]:
+            if n not in names:
+                names.append(n)
+        NEW = "(a new folder…)"
+        options = names + [NEW]
+        idx = options.index(app.folder) if app.folder in options else 0
+        self.scr.nodelay(False)
+        chosen = None
+        while True:
+            h, w = self.scr.getmaxyx()
+            self.scr.erase()
+            self.put(0, 0, f" move {app.name} to… ".ljust(w - 1),
+                     self.attr(C_HEAD, True))
+            self.put(1, 1, f"now in {app.folder}", self.attr(C_DIM))
+            for i, name in enumerate(options):
+                if 3 + i >= h - 2:
+                    break
+                sel = (i == idx)
+                self.put(3 + i, 1, f" {name} ".ljust(w - 2),
+                         self.attr(C_SEL, True) if sel else self.attr(C_NORM))
+            self.put(h - 1, 1, "↑↓ choose   enter move   esc keep",
+                     self.attr(C_DIM))
+            self.scr.refresh()
+            k = self.scr.getch()
+            if k in (27, ord("q"), ord("Q"), curses.KEY_LEFT):
+                self.note("left where it was")
+                return
+            if k in (curses.KEY_DOWN, ord("j")):
+                idx = min(len(options) - 1, idx + 1)
+            elif k in (curses.KEY_UP, ord("k")):
+                idx = max(0, idx - 1)
+            elif k in (10, 13, curses.KEY_ENTER):
+                chosen = options[idx]
+                break
+        if chosen == NEW:
+            chosen = self.prompt_line("a new folder",
+                                      "its name, up to 32 characters")
+            chosen = clean_folder_name(chosen or "")
+            if not chosen:
+                self.note("no name, so nothing moved", bad=True)
+                return
+        if chosen == default_folder(app):
+            CATEGORIES.pop(app.ident, None)     # back to the rule: no entry
+        else:
+            CATEGORIES[app.ident] = chosen
+        save_categories(CATEGORIES)
+        self.note(f"{app.name} → {chosen}")
+        if not self.filter:
+            self.folder = chosen
+        self.reload(keep_name=app.name)
+
     # -- main loop ---------------------------------------------------------
     def loop(self):
         self.reload()
@@ -1572,25 +1865,40 @@ class UI:
                     continue
                 return
             elif k in (curses.KEY_DOWN, ord("j")):
-                self.idx = min(len(self.filtered) - 1, self.idx + 1)
+                self.idx += 1
+                self.clamp()
             elif k in (curses.KEY_UP, ord("k")):
-                self.idx = max(0, self.idx - 1)
+                self.idx -= 1
+                self.clamp()
             elif k == curses.KEY_NPAGE:
-                self.idx = min(len(self.filtered) - 1, self.idx + 10)
+                self.idx += 10
+                self.clamp()
             elif k == curses.KEY_PPAGE:
-                self.idx = max(0, self.idx - 10)
+                self.idx -= 10
+                self.clamp()
             elif k == curses.KEY_HOME:
                 self.idx = 0
+                self.clamp()
             elif k == curses.KEY_END:
-                self.idx = max(0, len(self.filtered) - 1)
+                self.idx = len(self.filtered)
+                self.clamp()
             elif k == ord("/"):
                 typing_filter = True
                 self.note("typing a filter - enter when done")
+            elif k in (curses.KEY_LEFT, curses.KEY_BACKSPACE, 127, 8, 27,
+                       ord("h")):
+                if self.filter:
+                    self.filter = ""
+                    self.apply_filter()
+                elif self.folder is not None:
+                    self.close_folder()
             elif k in (10, 13, curses.KEY_ENTER, ord("\n")):
                 a = self.current
                 if not a:
                     continue
-                if a.orphan:
+                if isinstance(a, Folder):
+                    self.open_folder(a)
+                elif a.orphan:
                     self.note("orphan: nothing to run, but d clears it",
                               bad=True)
                 elif self.runner.alive:
@@ -1600,14 +1908,21 @@ class UI:
                     self.run_handover(a)
                 else:
                     self.run_screen(a)
-            elif k in (ord("i"), ord("I")) and self.current:
-                self.act_info(self.current)
-            elif k in (ord("l"), ord("L")) and self.current:
-                self.act_log(self.current)
-            elif k in (ord("d"), ord("D"), curses.KEY_F8) and self.current:
-                self.act_uninstall(self.current)
-            elif k in (ord("!"), ord("f"), ord("F")) and self.current:
-                a = self.current
+            elif k in (ord("i"), ord("I"), ord("l"), ord("L"), ord("d"),
+                       ord("D"), curses.KEY_F8, ord("!"), ord("f"), ord("F"),
+                       ord("c"), ord("C")) and self.current and \
+                    not self.current_app:
+                self.note("that is a folder - enter opens it", bad=True)
+            elif k in (ord("i"), ord("I")) and self.current_app:
+                self.act_info(self.current_app)
+            elif k in (ord("l"), ord("L")) and self.current_app:
+                self.act_log(self.current_app)
+            elif k in (ord("d"), ord("D"), curses.KEY_F8) and self.current_app:
+                self.act_uninstall(self.current_app)
+            elif k in (ord("c"), ord("C")) and self.current_app:
+                self.act_move(self.current_app)
+            elif k in (ord("!"), ord("f"), ord("F")) and self.current_app:
+                a = self.current_app
                 if a.important:
                     IMPORTANT.pop(a.ident, None)
                     self.note(f"{a.name} is no longer flagged")
@@ -1631,14 +1946,17 @@ def cli_list():
     apps = discover()
     print(f"{'':2} {'app':24} {'command':16} {'port':>5} {'size':>8} "
           f"{'runs':>5}  {'last run':<10} state")
-    for a in apps:
-        mark = "!" if a.important else ("R" if a.registered else " ")
-        state = "orphan" if a.orphan else ("up" if port_is_up(a.port) else "")
-        print(f"{mark:2} {a.name[:24]:24} {(a.cmd or '-')[:16]:16} "
-              f"{str(a.port or '-'):>5} {human(a.size) if a.path else '-':>8} "
-              f"{a.runs:>5}  {ago(a.last_run) if a.runs else '':<10} {state}")
-    print(f"\n{len(apps)} apps   R = registered with ma   "
-          f"! = important, asks twice")
+    folders = group_folders(apps)
+    for f in folders:
+        print(f"\n[{f.name}]  {len(f.apps)} apps, {f.runs} runs")
+        for a in f.apps:
+            mark = "!" if a.important else ("R" if a.registered else " ")
+            state = "orphan" if a.orphan else ("up" if port_is_up(a.port) else "")
+            print(f"{mark:2} {a.name[:24]:24} {(a.cmd or '-')[:16]:16} "
+                  f"{str(a.port or '-'):>5} {human(a.size) if a.path else '-':>8} "
+                  f"{a.runs:>5}  {ago(a.last_run) if a.runs else '':<10} {state}")
+    print(f"\n{len(apps)} apps in {len(folders)} folders   "
+          f"R = registered with ma   ! = important, asks twice")
 
 
 def cli_restore():
@@ -1676,6 +1994,10 @@ def main():
     def run(scr):
         nonlocal ui
         curses.curs_set(0)
+        try:
+            curses.set_escdelay(25)     # Esc is "back", not a prefix to wait on
+        except Exception:
+            pass
         scr.keypad(True)
         ui = UI(scr)
         ui.loop()

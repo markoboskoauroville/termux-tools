@@ -1,10 +1,13 @@
 # Termux tools
 
-Two programs built on the phone, inside Termux + PRoot.
+Three programs built on the phone, inside Termux + PRoot.
 
-    mamc     a Midnight Commander for every app on this phone: run one, stop it
-             with Q, uninstall it into a restorable trash
-    talk     Claude's replies spoken aloud in Beatrice's voice, on a code word
+    mamc      a Midnight Commander for every app on this phone, in folders:
+              open one, run an app, stop it with Q, move it with c, uninstall
+              it into a restorable trash
+    talk      Claude's replies spoken aloud in Beatrice's voice, on a code word
+    ccnotify  a notification when Claude stops or needs you, with a button
+              that pushes "continue" into the session from the lock screen
 
 The environment they were built in, and everything it does differently, is
 `modules/termux-proot-working.md` in MANTRA_MANIFEST. Read that first if
@@ -17,18 +20,28 @@ install -m 755 mamc/mamc.py  "$HOME/.mamc/mamc.py"
 install -m 755 mamc/mamc     "$PREFIX/bin/mamc"
 install -m 755 talker/*.py   "$HOME/.talker/"
 install -m 755 talker/talk   "$PREFIX/bin/talk"
+install -m 755 notify/ccnotify.py "$HOME/.ccnotify/ccnotify.py"
+install -m 755 notify/ccnotify notify/ccpush "$PREFIX/bin/"
 ```
 
-The talker also needs two hooks in `~/.claude/settings.json`:
+The talker and the notifier are hooks in `~/.claude/settings.json`:
 
 ```json
 "hooks": {
-  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 $HOME/.talker/hook_prompt.py"}]}],
-  "Stop":             [{"hooks": [{"type": "command", "command": "python3 $HOME/.talker/hook_stop.py"}]}]
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 $HOME/.talker/hook_prompt.py"}]},
+                       {"hooks": [{"type": "command", "command": "python3 $HOME/.ccnotify/ccnotify.py prompt"}]}],
+  "Stop":             [{"hooks": [{"type": "command", "command": "python3 $HOME/.talker/hook_stop.py"}]},
+                       {"hooks": [{"type": "command", "command": "python3 $HOME/.ccnotify/ccnotify.py stopped"}]}],
+  "Notification":     [{"hooks": [{"type": "command", "command": "python3 $HOME/.ccnotify/ccnotify.py needs"}]}]
 }
 ```
 
-Needs `python3` and `mpv`. Nothing else — both programs are stdlib only.
+The notifier's Continue button needs the session to be listening on a socket,
+which under PRoot it only does when told to: CLAUDE_CODE_TERMUX edition v9
+starts `claude --messaging-socket-path "$HOME/.claude/inbox/cc-$$.sock"`.
+`ccnotify status` says whether a session is reachable.
+
+Needs `python3`, `mpv` and Termux:API. Nothing else — all three are stdlib only.
 
 ---
 
@@ -36,122 +49,228 @@ Needs `python3` and `mpv`. Nothing else — both programs are stdlib only.
 
 **G9 of `delivery-gate.md`: what is being claimed, and what is not.**
 
-Recorded 12.9.2026, for mamc at 1511 lines and talker at 505 lines.
+Recorded 13.9.2026, for mamc at 2015 lines, talker at 514, ccnotify at 447.
+The record of 12.9.2026 is in the history of this file (commit 73d156d);
+what it said about the pipe-based runner was already out of date when it was
+written, and this record replaces it.
 
 ## What was run, and what it found
 
 | | result |
 |---|---|
-| **Test 1** mechanism, alone | 55 assertions, pass |
-| **Test 2** inside the running app | 33 checks over a real pty, pass |
-| **Test 3** the ugly cases | 27 checks, pass |
-| **Test 4** the upgrade | 19 checks, pass |
-| **G6** monkey + soak | 400 random keys, 12 start/stop cycles, pass |
-| **run-and-quit sweep** | every app on the phone started and stopped |
+| **Test 1** mechanism, alone | 108 assertions, pass |
+| **Test 2** inside the running app | 55 checks over a real pty, against a screen model, pass |
+| **Test 3** the ugly cases | 34 checks, pass |
+| **Test 4** the upgrade | 25 checks, pass |
+| **Test 5** every folder, every row | 7 folders, 22 apps drawn, pass (needs a pty: `script -qec … /dev/null`) |
+| **Test 6** terminal handover | pass |
+| **Test 7** ccnotify on a real Claude session | 17 checks, pass (after waiting out the session's 45 s startup window) |
+| **G6** monkey + soak | 400 random keys, 12 start/stop cycles, pass — after the crash below was fixed |
+| **gate sweep** over every app | G2 137 files · G3 28 .py, 20 launchers · G5 104 boundary calls · T2 20 of 21 run |
 
-**Nine real faults, found and fixed:**
+### mamc: folders
 
-1. **A descriptor claiming `paths=/etc` was obeyed.** Uninstalling such an app would have
-   moved `/etc` and `/usr` into the trash. Found by Test 3 (HOSTILE). `App.owns()` now
-   refuses any claim outside `$HOME` or a bin directory, and refuses those directories
-   themselves.
-2. **`for kind, w in cells` rebound the terminal width** for the rest of `draw()`. The key
-   bar then measured itself against a seven-column screen and drew nothing; the detail pane
-   was sliced to a negative width. Nothing raised. Found by Test 2 asking whether the footer
-   was on screen.
-3. **The runs column was formatted past the pane edge** and truncated away on every screen
-   size — so the number the whole list is sorted by was the one number never displayed. The
-   row is now built to fit, dropping columns inward as the screen narrows.
-4. **Symlinked launchers lost their app** — `realpath` returns the Termux spelling of home
-   and the `/root` test rejected it. `MAHA_TRANSCRIBE_TERMUX_TERMINAL` was listed with no
-   command and "ran" by the wrong entry point.
-5. **The talker was listed as an app** and could have been uninstalled by its own tooling.
-   Now protected, with `claude`, `ma`, `mamc` and `cc`.
-6. **Whitespace-only text was spoken.** It collapsed to `"."`, which is truthy, so a
-   Speechify call was spent synthesising a full stop.
-7. **Selecting the fourth row crashed the whole program.** An app can have no folder of its
-   own — MA Player lives entirely in its bin script — and `bin_only` was added to the model
-   without being added to the detail pane, so `a.path.replace(...)` hit `None`. Found by
-   Marko, on the phone, not by the suite. See *What the suite missed* below.
-8. **mamc listed its own source repository as an app.** `~/termux-tools` holds mamc's
-   source and tests, those files mention Flask, so discovery found it and offered to
-   uninstall it. A checkout with nothing installed from it is source, not an app — but the
-   test cannot be "does it have `.git`", because `MAHA_TRANSCRIBE_TERMUX_TERMINAL` is a clone
-   too and a real installed app. The test is whether anything was installed *from* it: a
-   launcher on PATH, or an ma descriptor.
-9. **A dead file and two dead symbols** — `control_daemon.py` (written for a notification
-   mechanism that never worked and referenced by nothing), an unused `signal` import, an
-   f-string with no placeholders. G3/G4.
+The first screen is folders now. Each app is filed by a keyword rule
+(Commute, Transcribe & speech, Read & play, Tools; loose scripts are
+Experiments; the rest is Other; orphans are Orphans), Enter opens one, ← comes
+back, `/` searches every folder at once, and `c` moves an app to another
+folder or a new one. A move is kept in `~/.mamc/categories.json` by the app's
+path — the same key as the important flag, for the same reason. Test 4 shows a
+phone that never had the file starts without it and that merely looking never
+writes it.
 
-**Four "failures" that were the test's fault, not the program's**, each one worth as much as
-a real bug because a test that lies is worse than no test:
+### talker: Stop is a finished playback
 
-* arrow keys "did nothing" — the test sent `ESC [ B`; `keypad(True)` means a real terminal
-  sends `ESC O B`
-* six apps "failed to start" — the harness gave them no tty; with a pty, three run and quit
-  on their own key
-* checks passed and failed on alternate runs — fixed sleeps, now waits for the marker
-* the monkey "crashed" the program — it had pressed `q`
+mpv exits 4 when it is told to quit over its socket, which is what the Stop
+button does. That was read as a failure, and the same clip was handed to
+Android's player — so Stop made her start the sentence again, out of reach of
+the socket. `talker.log` had said `mpv rc=4` nine times. Exit 4 is now
+"stopped"; the notification buttons are Pause/Resume, Stop and Off (three is
+all Android gives); and the reply is taken from the Stop hook's own
+`last_assistant_message`, with the transcript as a fallback.
 
-## What the suite missed, and why
+### ccnotify: a bubble when Claude stops or needs you
 
-**A 33-check UI suite passed while the fourth row of the list crashed on sight.**
+Three hooks. A reply finishing posts *Claude stopped* with its first words;
+a permission or an idle prompt posts *Claude needs you*; your next prompt
+clears both. Each bubble has a Continue button that pushes a message into the
+session over Claude Code's cross-session messaging socket (`ccpush`), which
+under PRoot exists only because the launcher now names one
+(`--messaging-socket-path`, CLAUDE_CODE_TERMUX v9). Test 7 starts a real
+session on a pty and proves the chain end to end: the hook fires, the bubble
+is posted with the right words and buttons, a pushed message is answered by
+the session, and a permission prompt raises the second bubble.
 
-It pressed Down twice. MA Player is fourth. That is `checking-the-checks.md`'s central
-failure wearing a new hat: walking two rows of a list and declaring the list drawn is a
-check that runs nothing, and from outside it is indistinguishable from a check that found
-nothing.
+**A pushed message arrives as a message from another session, not as typed
+input.** So it says who sent it ("From Marko, via the phone's notification
+button: …"). It cannot approve a permission prompt; that still needs the
+terminal or the Claude app, and `inputNeededNotifEnabled` /
+`agentPushNotifEnabled` are on so the Claude app shows a push at the same
+moments.
 
-`tests/test5_every_row.py` now draws the detail pane for **every** app and builds every
-`targets()` list, under a real pty. The rule it encodes: when a program renders a
-collection, the test renders all of it. Not the first, not a sample — all of it.
+### The session that wrote this record was killed, and what that taught
 
-**The monkey missed it too, and for a different reason worth writing down.** Replaying its
-exact seed shows which rows it selected: 0, 1, 2, then 5, 6, 7 … It never landed on 4 at
-all. Its key list includes PageUp and PageDown, and those jumps hopped straight over the one
-row that crashes. Nine more navigation keys were swallowed while it was in filter mode.
+The record of 13.9.2026 was being written when Termux killed the session
+that was writing it — with the folder work uncommitted, the monkey red, and
+Test 7 still running. The next session found it in the working tree. Three
+things came out of that:
 
-So: **a random monkey is not coverage, and must not be reported as if it were.** 400
-keypresses that happen to skip a row prove nothing about that row. The monkey is for finding
-states nobody imagined; enumerating every item of a collection is a separate job, and needs a
-separate test that walks the list deliberately.
+* **`ccnotify` bounds every Termux:API call and reaps the hung ones.**
+  Twelve `termux-notification` calls were found waiting forever
+  (`__skb_wait_for_more_packets`, children of pid 1, up to fifteen minutes
+  old), all left by these hooks. Android 12+ counts an app's orphaned
+  processes against a limit of 32 and kills the excess; a session that has
+  run for hours has left far more than that behind it. Every call now runs
+  under `timeout -k 5 45`, every hook first calls `reap()` (orphans older
+  than two minutes whose argv names a `termux-*` script or `termux-api`;
+  never the wake lock), and `ccnotify reap` does it by hand. Test 1 covers
+  the selection on made-up rows and on a real orphan.
+* **Process age comes from `CLOCK_BOOTTIME`**, because proot-distro binds a
+  fake `/proc/uptime` that reads about two minutes forever, and the first
+  version computed an age of minus three hours.
+* **The Claude Code launcher takes `termux-wake-lock`** on every start
+  (CLAUDE_CODE_TERMUX v10), which is the other half of staying alive.
+
+### mamc: the monkey's crash, and the harness that could not see it
+
+**`min(len(rows) - 1, idx + 1)` on an empty list is -1**, and `rows[-1]` of
+nothing raises. Type a filter that matches no app, press Down, and the whole
+program came down with `IndexError` out of `draw()`. The suite had never
+pressed a key on an empty list on purpose; the monkey did, at key 290 in
+one run and 381 in another. `UI.clamp()` now keeps `idx` and `top` on a row
+that exists and is called from every navigation key and every redraw; Test 2
+presses Down, Up, PageDown, PageUp, End, Home, Enter, i, c and d on an empty
+list deliberately. And the monkey prints 1500 characters of a traceback, not
+200: the first version showed `main()` and `curses.wrapper` and stopped
+before the line that mattered.
+
+**Then the new check failed three times with the program right.** curses
+repaints only the cells that changed and trims a run's equal leading
+characters: the screen said `tpedit`, the pty carried `pedit` (the old row
+began with `tts_reader`); the header went from `9 apps match` to `1 apps
+match` and the pty carried a lone `1`. Every check in Test 2 that matched a
+word in the captured bytes was matching luck — it passed when the previous
+frame happened to differ enough. `tests/vt.py` is a 200-line screen model
+(a grid, a cursor, a scroll region, the sequences ncurses emits for xterm);
+`u.screen()` is now what is on the screen, whole, and `u.expect()` looks in
+both the stream and the screen. A resize does not help: `TIOCSWINSZ` on a
+harness pty with no controlling process delivers no SIGWINCH at all.
+
+Two smaller things the same afternoon: a CSI Home or End (`ESC [ H`) is
+three keys to this program, the first of which is Esc, "back" — a real
+terminal in keypad mode sends `ESC O H`; and Test 7's session must start
+with `--settings '{"remoteControlAtStartup": false}'`, because Remote
+Control coming up mid-prompt clears the conversation and eats the prompt,
+and the five red checks that followed blamed the hooks.
+
+### The sweep over every app: what was fixed
+
+Twenty-one apps. The four the previous record left open, and what the gates
+found on top:
+
+1. **Commute could not start from its descriptor.** `~/.ma/apps/20-commute.app`
+   ran a command called `commute`; the launcher had been renamed `day.commute`.
+   Fixed in the descriptor. Commute now starts, serves 8082 and stops.
+2. **night.commute daemonises and exits by design.** Not a fault: the runner
+   already tracks the process group, and the sweep now judges *serving*
+   (alive, or a server left in the group), not *alive*.
+3. **maha-transcribe on 8082 "collides" with Commute.** Only if both run, and
+   mamc runs one at a time. Not fixed, because there is nothing to fix; the
+   run screen shows `● something is listening on <port>` when a port is taken.
+4. **`test_server_modified.py` did not compile:** two literal `\n` where
+   newlines belonged. Repaired. Both loose Gemini servers also called `log`
+   and `logf`, names that did not exist anywhere — a NameError waiting on the
+   task and voice paths. Now `logging.info`.
+5. **G5: four calls with no deadline, all in openrouter** — two `requests.post`,
+   an `edge-tts` subprocess, a `termux-open-url` subprocess. Given 120 s, 120 s,
+   180 s, 15 s. The first version of the check reported sixteen; twelve of
+   those had a timeout behind a nested paren the pattern could not see. The
+   check was fixed and shown to fail on a fixture before its number was
+   believed (`checking-the-checks.md` 8a).
+6. **G2: keys in source.** `openrouter/app.py` carried an OpenRouter key and
+   five Groq keys as literals; `.mafinder/update_pools.py` a Groq key. Moved to
+   `keys.txt` and `groq_api.txt` beside them, mode 600, read at startup, same
+   values — the programs behave exactly as before. **Not moved:** the same
+   five Groq keys in `openrouter/maha_transcribe.html` and a Maps key in
+   `.mafinder/spar-dm-finder.html`, because a browser page needs them
+   client-side; every browser on the LAN can read them. Marko decides.
+7. **ccnotify was listed as an app.** Its launcher names a folder in HOME,
+   which is what makes something look like an app. Protected, like `talk`.
+8. **mamc: `proc` assigned and never used** in the pump thread. Removed.
+
+Originals of every app file edited are in `~/.mamc/gate-backups/`.
+
+### Faults in the tests, which count as much as faults in the code
+
+* **Test 7 waited for "alpha" and matched the echo of its own typing.** The
+  answer must differ from the prompt: it now asks for capitals.
+* **Test 7 read a "stopped" line from an earlier run** and killed the session
+  before its hooks had fired. It reads the log from this run's offset only.
+* **Test 7 typed a whole line in one write** and the fresh input box dropped
+  it. One key at a time, after the box is on screen.
+* **Test 7's push went to a person's live session.** Two sessions share one
+  inbox file; the last hook to fire wins. The test now runs its session with
+  a private `CCNOTIFY_DIR`. The same rule of the sweep applies: exclude your
+  own sabotage — and never let it reach someone else.
+* **The monkey restored two apps from the trash** (`t` then `r`) that had been
+  uninstalled on purpose the day before, and could have uninstalled an ordinary
+  one (`d` then `y`). The trash is set aside for its run and `y` is out of its
+  keys. `magem` and `bicycle-finder` are back on the phone as a result: see
+  KNOWN.
+* **Test 2 matched a curses title that was only half redrawn** (" m" was
+  already on screen). It matches the second line, which is new in full.
+* **The G5 pattern stopped at the first closing paren** — above.
+* Test 2 failed four checks when run *concurrently* with Test 7 and passed
+  all fifty alone. The suite is run sequentially; two pty programs on one
+  phone at once is a load test nobody asked for.
 
 ## The gates
 
 | gate | verdict |
 |---|---|
-| G1 provenance | **now passes** — this repository is it. It did not exist until today |
-| G2 secrets | pass. No key-shaped token in either source; the talker reads keys from a file it never logs |
-| G3 analysis | pass. Compiles with SyntaxWarning as error; pyflakes clean |
-| G4 dead code | pass, after removing what §7 above lists |
-| G5 dead loops | pass. Every UI loop blocks on `getch`; every `subprocess.run` carries a timeout; the mpv socket has a 3 s deadline |
-| G6 stress | pass |
-| G7 budgets | recorded below. No previous release to compare against |
-| G8 upgrade | pass — Test 4 |
+| G1 provenance | pass — this repository, clean tree at the commit this record is in |
+| G2 secrets | pass for the three programs (0 key-shaped strings); the apps: 57 hits, 55 in key files by house convention, 2 in HTML pages listed under NOT claimed |
+| G3 analysis | pass. All three compile with SyntaxWarning as error; pyflakes clean. The apps: 28 files compile, 0 undefined names, 27 unused-import-class messages read and left |
+| G4 dead code | pass. One unused variable removed; the docstring's duplicate lines removed |
+| G5 dead loops | pass. Every UI loop blocks on `getch`; every subprocess carries a timeout; the mpv socket 3 s, the push socket 4 s. The apps: 104 boundary calls, 104 with deadlines |
+| G6 stress | pass, with the monkey defanged as above |
+| G7 budgets | below |
+| G8 upgrade | pass — Test 4, including a phone that never had categories.json |
 | G9 the record | this document |
 
-## Budgets, recorded so the next release can be compared
+## Budgets
 
-    discover()          1.77 s best, 1.90 s mean, over 20 apps
-    mamc --list, cold   2.37 s
-    peak memory         20.1 MB
-    source              55.8 KB, 1511 lines
-    state on disk       56.4 KB
-    dependencies        stdlib only
+    discover()          3.5 s mean over 22 apps, best 2.9 s (was 1.9 s over 21) — measured with 7.5 of
+                        7.6 GB RAM in use and 3.6 GB of swap; whether the code or the phone is slower is not known
+    mamc --list, cold   4.0 s (was 2.4 s), same caveat
+    source              mamc 2015 lines (was 1511), talker 514, ccnotify 447, tests/vt.py 210
+    dependencies        stdlib only, plus Termux:API for the bubbles
 
 ## What is NOT claimed
 
-* **No other phone has run this.** Every number above is from one device, one Android
-  version, one PRoot distro. `claude-code-termux.md` §7 is right that this is more of a
-  limitation than it first looks.
-* **The uninstall path is tested with fixtures, not with your apps.** Test 3 removes and
-  restores a throwaway app. Nothing in the suite uninstalls something real, on purpose.
-* **G7 has no baseline.** The budgets are a first measurement, not a comparison.
-* **The run-and-quit sweep does not prove an app WORKS**, only that it starts, holds its
-  port, and stops cleanly. `Commute`'s descriptor execs a command that does not exist and
-  `maha-transcribe` collides with it on port 8082 — both are environment faults the sweep
-  surfaced, and neither is fixed here.
-* **The talker's Speechify path needs the network and a live key.** The offline fallback is
-  exercised; a key that has run out of credit is not.
-* **No fuzzing, no mutation testing, no formal verification** — `delivery-gate.md` §15 says
-  why, and nothing here changes that argument.
+* **No other phone has run this.** One device, one Android, one PRoot.
+* **The four tests were run on the three programs here, not on the twenty-one
+  apps.** The apps went through the gates a machine can run in minutes — G2,
+  G3, G5 and a start-serve-stop — and the fixes above are what those found.
+  Each app's own four tests are a session per app and have not been done.
+* **`magem` fails the run sweep** and is not fixed: its launcher runs
+  `python server.py` in `~/magem`, and there is no `server.py` there. It came
+  back out of the trash today (see KNOWN).
+* **The keys in the two HTML pages** are reported, not moved.
+* **The bubbles themselves were seen posted only by their command line.**
+  Test 7 shims `termux-notification` and reads the arguments back; whether
+  Android drew them is checked by eye (one real bubble is posted at the end).
+* **`ccpush` cannot approve a permission prompt.** By design of Claude Code:
+  a peer message is not the user's key press.
+* **The uninstall path is tested with fixtures, not with real apps.**
+* **No fuzzing, no mutation testing.**
+
+## KNOWN
+
+* `magem` and `bicycle-finder` were restored from the trash by the monkey
+  (or by someone using mamc at 08:20 — the trash keeps no log, and both are
+  possible). Both were uninstalled on purpose on 12.9.2026. They are left in
+  place rather than re-trashed on a guess; `d` in mamc puts either back.
+* A session started from inside another Claude session has transcript saving
+  off; the talker and the notifier read the reply from the hook input instead,
+  so they speak and post in those sessions too.

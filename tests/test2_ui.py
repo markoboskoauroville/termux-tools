@@ -9,12 +9,14 @@ import os
 import pty
 import re
 import select
-import signal
 import struct
 import subprocess
 import sys
 import termios
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vt import Screen   # noqa: E402  the screen model, tests/vt.py
 
 fails, count = [], 0
 
@@ -37,6 +39,7 @@ class UI:
             env=dict(os.environ, TERM="xterm-256color"))
         os.close(s)
         self.buf = b""
+        self.vt = Screen(rows, cols)
         # discover() walks $HOME looking for server code and takes seconds.
         # Keys sent before the first draw are buffered and answered after the
         # capture window closes, which reads exactly like a dead keyboard.
@@ -55,9 +58,11 @@ class UI:
             r, _, _ = select.select([self.m], [], [], 0.15)
             if r:
                 try:
-                    self.buf += os.read(self.m, 200000)
+                    chunk = os.read(self.m, 200000)
                 except OSError:
                     break
+                self.buf += chunk
+                self.vt.feed(chunk)
 
     def send(self, keys, wait=0.6):
         os.write(self.m, keys)
@@ -83,12 +88,24 @@ class UI:
         """
         end = time.time() + timeout
         while time.time() < end:
-            hay = self.text.lower() if lower else self.text
-            needle = marker.lower() if lower else marker
+            # Two places to look. The stream since clear() holds anything
+            # that was drawn, including a message that has already gone.
+            # The screen model holds what is there NOW, whole -- curses
+            # sends only the cells that changed, so a word on screen may
+            # never have crossed the pty in one piece (tests/vt.py).
+            hay = self.text + "\n" + self.screen()
+            needle = marker
+            if lower:
+                hay, needle = hay.lower(), marker.lower()
             if needle in hay:
                 return True
             self.pump(0.3)
         return False
+
+    def on_screen(self, marker, lower=False):
+        """Only what is on the screen at this moment, nothing that was."""
+        scr = self.screen()
+        return (marker.lower() in scr.lower()) if lower else (marker in scr)
 
     @property
     def text(self):
@@ -96,8 +113,8 @@ class UI:
                       self.buf).decode("utf-8", "replace")
 
     def screen(self):
-        """Roughly what is on screen now: the tail of what was drawn."""
-        return self.text[-6000:]
+        """What is on screen now, row by row, from the screen model."""
+        return self.vt.text()
 
     def clear(self):
         self.buf = b""
@@ -111,17 +128,69 @@ class UI:
         os.close(self.m)
 
 
-print("the list draws")
+print("the first screen is folders")
 u = UI()
 s = u.screen()
 check("title is drawn", "mamc" in s)
 check("says how it is sorted", "most-run first" in s)
-check("the key bar is there", u.expect("uninstall") and u.expect("flag"))
-check("an app is listed", "MA Reader" in s)
-check("the important marker is drawn", "!" in s)
+check("says it is folders", "folders," in s)
+check("the key bar offers open", u.expect("open"))
+check("a folder is listed", "Commute" in s and "Tools" in s)
 check("run counts are shown", re.search(r"\d+\u00d7", s) is not None)
+check("the detail pane lists the folder's apps", u.expect("enter opens it"))
+
+print("opening a folder, and backing out of it")
+u.clear(); u.send(b"\n", 1.0)
+check("enter opens the folder", u.expect("apps, most-run first", 12) and "\u25c2" in u.text)
+check("the key bar now offers run and back", u.expect("uninstall", 12) and u.expect("back", 12))
+check("an app row is drawn", u.expect("\u00d7", 12) or u.expect("-", 12))
+u.clear(); u.send(b"\x1bOD", 1.0)          # left arrow, application mode
+check("left arrow goes back to the folders", u.expect("folders,", 12))
+u.clear(); u.send(b"d", 1.0)
+check("d on a folder says to open it first", u.expect("that is a folder", 12, lower=True))
+
+print("the filter searches every folder at once")
+u.clear(); u.send(b"/"); u.send(b"nightcommute"); u.send(b"\n", 1.0)
+check("an app is found without opening its folder", u.expect("night.commute", 12))
+check("the header says how many match", u.expect("apps match", 12))
+u.clear(); u.send(b"\x1bOD", 1.0)
+check("left arrow clears the filter, back to folders", u.expect("folders,", 12))
+
+print("moving an app to another folder")
+import json as _json
+CATS = os.path.expanduser("~/.mamc/categories.json")
+_cats_before = open(CATS).read() if os.path.exists(CATS) else None
+u.clear(); u.send(b"/"); u.send(b"openrouter"); u.send(b"\n", 1.0)
+u.clear(); u.send(b"c", 1.0)
+# curses redraws only what changed, and " m" at the top-left was already
+# there from " mamc", so the stream reads "ove openrouter to". The second
+# line is new in full.
+check("c opens the move screen", u.expect("now in ", 12))
+u.clear(); u.send(b"j" * 15, 0.8); u.send(b"\n", 1.0)     # the last entry: a new folder
+check("the last choice asks for a new name", u.expect("a new folder", 12))
+u.clear(); u.send(b"Zeta"); u.send(b"\n", 1.5)
+check("it says where it went", u.expect("openrouter \u2192 Zeta", 12))
+_c = _json.load(open(CATS))
+check("the choice is written to disk, keyed by path",
+      _c.get(os.path.expanduser("~/openrouter")) == "Zeta", str(_c))
+u.clear(); u.send(b"\x1bOD", 1.0)
+check("the new folder is on the first screen", u.expect("Zeta", 12))
+u.clear(); u.send(b"/"); u.send(b"openrouter"); u.send(b"\n", 1.0)
+u.clear(); u.send(b"c", 1.0); u.send(b"k" * 15, 0.8); u.send(b"\n", 1.5)
+_c = _json.load(open(CATS))
+check("choosing an existing folder replaces the choice",
+      _c.get(os.path.expanduser("~/openrouter")) != "Zeta", str(_c))
+u.clear(); u.send(b"\x1bOD", 1.0)
+check("the empty folder is gone from the first screen", u.expect("folders,", 12) and "Zeta" not in u.screen())
+if _cats_before is None:
+    os.remove(CATS)
+else:
+    open(CATS, "w").write(_cats_before)
+u.clear(); u.send(b"r", 3.0)
 
 print("navigation and the detail pane")
+u.clear(); u.send(b"\n", 1.0)      # open the first folder: the flows below want app rows
+check("inside a folder again", u.expect("apps, most-run first", 12))
 # ESC O B, not ESC [ B. keypad(True) puts the terminal into APPLICATION
 # cursor mode, and terminfo's kcud1 is then \EOB -- which is what a real
 # terminal sends and what ncurses matches. ESC [ B arrives as three
@@ -142,6 +211,28 @@ u.clear(); u.send(b"/"); u.send(b"tpedit"); u.send(b"\n", 1.0)
 s = u.screen()
 check("filter narrows to one app", u.expect("tpedit"))
 check("filter does not show unrelated apps", "MA Reader" not in s.split("tpedit")[-1])
+
+print("a filter that matches nothing, and every navigation key on it")
+# The monkey found this one: min(len - 1, idx + 1) on an empty list is -1,
+# and filtered[-1] of nothing raised IndexError out of draw(). A row-walk
+# over an empty list is a case the suite never pressed on purpose.
+u.clear(); u.send(b"/"); u.send(b"\x7f" * 14); u.send(b"zzqx-nothing"); u.send(b"\n", 1.0)
+check("it says nothing matches", u.expect("0 apps match", 12) and u.expect("nothing here", 12))
+# End and Home in application cursor mode (ESC O F / ESC O H), the form a
+# real terminal sends while keypad(True) is on. The CSI form (ESC [ F) is
+# not one key here: it is Esc, which is "back", and then two letters.
+for key in (b"\x1bOB", b"j", b"\x1bOA", b"k", b"\x1b[6~", b"\x1b[5~", b"\x1bOF", b"\x1bOH", b"\n", b"i", b"c", b"d"):
+    u.send(key, 0.3)
+u.pump(1.0)
+check("Down, Up, PageDown, PageUp, End, Home, Enter, i, c, d on the empty list do not crash it",
+      u.p.poll() is None and "Traceback" not in u.text, f"rc={u.p.poll()}")
+check("and the screen still shows the empty list", u.on_screen("0 apps match") and u.on_screen("nothing here"),
+      repr(u.screen()[:300]))
+u.clear(); u.send(b"\x7f", 1.0)
+check("backspace clears the filter and the list is back", u.expect("most-run first", 12) and not u.on_screen("apps match"),
+      repr(u.screen()[:300]))
+u.clear(); u.send(b"/"); u.send(b"tpedit"); u.send(b"\n", 1.0)
+check("the filter still works afterwards", u.expect("1 apps match", 12) and u.on_screen("tpedit"), repr(u.screen()[:300]))
 
 print("running an app with Enter, and stopping it with Q")
 u.clear(); u.send(b"\n", 8.0)

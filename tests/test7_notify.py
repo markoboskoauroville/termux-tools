@@ -31,12 +31,22 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vt import Screen   # noqa: E402  the screen model, tests/vt.py
+
 HOME = os.path.expanduser("~")
 CCN = os.path.join(HOME, ".ccnotify", "ccnotify.py")
-LOG = os.path.join(HOME, ".ccnotify", "ccnotify.log")
-INBOX = os.path.join(HOME, ".ccnotify", "inbox.json")
+# A private notifier directory for this run. The session under test inherits
+# CCNOTIFY_DIR, so its hooks announce themselves here and nowhere else -- a
+# push from this test can then only reach this test's session. Without it a
+# person's live session, whose hook had fired last, was the one that got
+# "reply with the single word bravo".
+T7_DIR = os.path.join(HOME, ".ccnotify", "t7")
+os.environ["CCNOTIFY_DIR"] = T7_DIR
+LOG = os.path.join(T7_DIR, "ccnotify.log")
+INBOX = os.path.join(T7_DIR, "inbox.json")
 SOCK_DIR = os.path.join(HOME, ".claude", "inbox")
-SHIM_DIR = os.path.join(HOME, ".ccnotify", "shim-t7")
+SHIM_DIR = os.path.join(T7_DIR, "shim-t7")
 SHIM_LOG = os.path.join(SHIM_DIR, "calls.txt")
 fails, count = [], 0
 
@@ -69,8 +79,14 @@ class Session:
             # manifest first; one run did exactly that, cloned a repository
             # and sat in a permission dialog instead of saying ALPHA. This is
             # a test of the hooks, not of the model's initiative.
+            # remoteControlAtStartup is on for every session on this phone
+            # (user settings, 13.9.2026). Once, in a session under test, it
+            # came up while the first prompt was being typed, cleared the
+            # conversation and printed "send the request again". The hooks
+            # are what is tested here; the session runs without it.
             ["claude", "--model", "haiku", "--messaging-socket-path", sock,
              "--permission-mode", "default",
+             "--settings", '{"remoteControlAtStartup": false}',
              "--append-system-prompt",
              "TEST HARNESS: answer each message with exactly what it asks for and "
              "nothing else. Use a tool only when a message explicitly names the tool. "
@@ -79,20 +95,32 @@ class Session:
             start_new_session=True, close_fds=True)
         os.close(slave)
         self.buf = b""
+        self.vt = Screen(40, 110)
+        self.started = time.time()
+
+    def pump(self, t):
+        end = time.time() + t
+        while time.time() < end:
+            r, _, _ = select.select([self.master], [], [], 0.25)
+            if r:
+                try:
+                    chunk = os.read(self.master, 65536)
+                except OSError:
+                    return
+                self.buf += chunk
+                self.vt.feed(chunk)
 
     def read_until(self, pattern, timeout):
         end = time.time() + timeout
         rx = re.compile(pattern.encode() if isinstance(pattern, str) else pattern)
         while time.time() < end:
-            r, _, _ = select.select([self.master], [], [], 0.25)
-            if r:
-                try:
-                    self.buf += os.read(self.master, 65536)
-                except OSError:
-                    return False
+            self.pump(0.25)
             if rx.search(ANSI.sub(b"", self.buf)):
                 return True
         return False
+
+    def screen(self):
+        return self.vt.text()
 
     def text(self):
         return ANSI.sub(b"", self.buf).decode("utf-8", "replace")
@@ -108,8 +136,37 @@ class Session:
             time.sleep(0.02)
         self.read_until(re.escape(s[-12:]), 5)
         if enter:
+            self.submit(s)
+
+    # Measured 13.9.2026 on this phone: the input box draws about 3 s after
+    # start, but the session is still starting for another half minute
+    # (plugins, a quota fetch, a triggers fetch with a 15 s timeout;
+    # --debug logs "Loaded plugins" at 37 s). Typed text shows in the box
+    # during that window, but an Enter is dropped without a trace, and so
+    # were five Enters eight seconds apart. One Enter after 45 s submitted
+    # every time, whether the text was typed at 4 s or at 40 s.
+    READY_AFTER = 45.0
+
+    def submit(self, typed, tries=3, wait=10.0):
+        """Wait out the startup window, then Enter, and Enter again if the
+        box kept the line. Before this, the prompt sat typed in the box, no
+        reply came, no Stop hook fired, and every check downstream blamed
+        the hooks (three runs). The screen model says whether the line left
+        the box; only then is the keystroke believed."""
+        marker = typed[:24]
+        remaining = self.started + self.READY_AFTER - time.time()
+        if remaining > 0:
+            self.pump(remaining)
+        for _ in range(tries):
             time.sleep(0.5)
             os.write(self.master, b"\r")
+            end = time.time() + wait
+            while time.time() < end:
+                self.pump(0.3)
+                box = [l for l in self.screen().splitlines() if l.startswith("\u276f")]
+                if not any(marker in l for l in box):
+                    return True
+        return False
 
     def close(self):
         try:
@@ -153,6 +210,10 @@ def shim_calls():
 
 # --- the shim: record every termux-notification call instead of posting -----
 os.makedirs(SHIM_DIR, exist_ok=True)
+try:
+    os.remove(INBOX)          # nothing announced yet: this run must do it
+except OSError:
+    pass
 for name in ("termux-notification", "termux-notification-remove"):
     with open(os.path.join(SHIM_DIR, name), "w") as fh:
         fh.write("#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> " + SHIM_LOG + "\n")
@@ -181,7 +242,7 @@ try:
     # The reply must differ from the prompt: the pty echoes what was typed,
     # and a lowercase alpha on screen proves only that the keys arrived.
     got = s.read_until(r"ALPHA", 90) and wait_for_log("stopped:", 60)
-    check("the Stop hook ran after the reply", got, "screen: " + s.text()[-500:])
+    check("the Stop hook ran after the reply", got, "screen:\n" + "\n".join(l for l in s.screen().splitlines() if l.strip())[-1200:])
     rec = json.load(open(INBOX)) if os.path.exists(INBOX) else {}
     check("the hook recorded the session's socket", rec.get("socket") == sock, str(rec))
     check("and its token", bool(rec.get("token")))
@@ -233,7 +294,7 @@ r = subprocess.run(["python3", CCN, "needs"], input=json.dumps(
     capture_output=True, text=True, timeout=20)
 check("the real post returned 0", r.returncode == 0, r.stdout + r.stderr)
 
-import shutil; shutil.rmtree(SHIM_DIR, ignore_errors=True)
+import shutil; shutil.rmtree(T7_DIR, ignore_errors=True)
 print(f"\n{count} checks, {len(fails)} failures")
 for f in fails:
     print("  ", f)

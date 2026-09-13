@@ -178,6 +178,29 @@ if happ:
     check("nothing left in its process group", left == "", f"-> {left!r}")
 shutil.rmtree(hang, ignore_errors=True)
 
+print("FOLDERS - a corrupt, hostile or stale categories.json")
+_saved_cf = m.CATEGORIES_FILE
+m.CATEGORIES_FILE = os.path.join(HOME, ".zz_t3_categories.json")
+try:
+    for junk in ("{ broken", "[]", '{"/root/.tpedit": ""}', '{"/root/.tpedit": null}',
+                 '{"/root/.tpedit": "' + "z" * 500 + '"}',
+                 '{"/root/.gone_forever": "Ghost"}', '{"": "x"}'):
+        open(m.CATEGORIES_FILE, "w").write(junk)
+        try:
+            apps = m.discover()
+            fs = m.group_folders(apps)
+            ok = all(a.folder for a in apps) and all(len(f.name) <= m.FOLDER_NAME_MAX for f in fs) \
+                and not any(f.name == "Ghost" for f in fs) and sum(len(f.apps) for f in fs) == len(apps)
+            check(f"categories.json {junk[:26]!r}: every app filed, no ghost folder", ok)
+        except Exception as e:
+            check(f"categories.json {junk[:26]!r} does not crash discovery", False, str(e))
+finally:
+    try:
+        os.remove(m.CATEGORIES_FILE)
+    except OSError:
+        pass
+    m.CATEGORIES_FILE = _saved_cf
+
 print("SABOTAGE - the flag file is destroyed mid-flight")
 orig_imp = open(m.IMPORTANT_FILE).read() if os.path.exists(m.IMPORTANT_FILE) else None
 try:

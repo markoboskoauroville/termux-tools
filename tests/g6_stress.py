@@ -35,10 +35,24 @@ def check(label, ok, detail=""):
 print("THE MONKEY - 400 random keypresses, including the dangerous ones")
 random.seed(20260912)
 KEYS = [b"j", b"k", b"\x1bOA", b"\x1bOB", b"i", b"l", b"t", b"r", b"/", b"\n",
-        b"\x1b", b"\x7f", b"!", b"f", b"d", b"n", b"y", b"a", b"z", b"0",
-        b"\x03", b" ", b"\t", b"\x1b[5~", b"\x1b[6~", b"g", b"G"]
+        b"\x1b", b"\x7f", b"!", b"f", b"d", b"n", b"a", b"z", b"0",
+        b"\x03", b" ", b"\t", b"\x1b[5~", b"\x1b[6~", b"g", b"G",
+        b"\x1bOD", b"c", b"h"]
 # No q and no Q. Both quit, by design -- a monkey that presses quit and then
-# reports "it exited" is reporting its own keystroke as a crash.
+# reports "it exited" is reporting its own keystroke as a crash. And no y:
+# d then y uninstalls an ordinary app for real, and over 400 keys that pair
+# comes up about every other run. A monkey that can move your apps to the
+# trash is testing your luck, not the program.
+#
+# And the trash is put out of reach first. t opens it and r restores the
+# selected slot: the monkey restored two apps that had been uninstalled on
+# purpose the day before, and they reappeared in the list looking like a
+# discovery bug. Random keys against real state is sabotage of the person,
+# not of the program.
+TRASH = os.path.join(m.MAMC_DIR, "trash")
+TRASH_ASIDE = TRASH + ".g6-aside"
+if os.path.isdir(TRASH):
+    os.rename(TRASH, TRASH_ASIDE)
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 90, 0, 0))
 p = subprocess.Popen(["bash", "/data/data/com.termux/files/usr/bin/mamc"],
@@ -91,7 +105,7 @@ txt = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", buf).decode("utf-8", "replace")
 alive = p.poll() is None
 check(f"survived {sent} random keys", alive, "" if alive else f"rc={p.poll()}")
 check("no traceback", "Traceback" not in txt,
-      txt[txt.find("Traceback"):][:200] if "Traceback" in txt else "")
+      txt[txt.find("Traceback"):][:1500] if "Traceback" in txt else "")
 check("no curses error escaped", "curses.error" not in txt)
 check("nothing was actually uninstalled",
       os.path.isdir(os.path.expanduser("~/.tpedit")) and
@@ -157,6 +171,15 @@ shutil.rmtree(fixture, ignore_errors=True)
 runs = m.load_runs()
 runs.pop(fixture, None)
 m.save_runs(runs)
+
+if os.path.isdir(TRASH_ASIDE):
+    if os.path.isdir(TRASH):
+        # the run made a trash of its own: keep both, the real one wins
+        import shutil as _sh
+        for name in os.listdir(TRASH):
+            _sh.move(os.path.join(TRASH, name), TRASH_ASIDE)
+        os.rmdir(TRASH)
+    os.rename(TRASH_ASIDE, TRASH)
 
 print(f"\n{len(fails)} failures")
 sys.exit(1 if fails else 0)

@@ -196,6 +196,78 @@ _saved = cn.INBOX
 cn.INBOX = os.path.join(m.HOME, ".zz_no_inbox.json")
 check("push with no announced session is refused, not hung", cn.push("x")[0], False)
 cn.INBOX = _saved
+# reaping: a Termux:API call left waiting for an app that will never answer
+check("a termux-notification call is a Termux:API call",
+      cn.is_termux_api_call(["/data/data/com.termux/files/usr/bin/bash",
+                             "/data/data/com.termux/files/usr/bin/termux-notification", "--id", "x"]), True)
+check("the libexec helper is one too", cn.is_termux_api_call(["/x/libexec/termux-api", "Notification"]), True)
+check("wrapped in timeout it still is", cn.is_termux_api_call(["timeout", "-k", "5", "45", "termux-toast", "hi"]), True)
+check("the wake lock is NOT reaped", cn.is_termux_api_call(["termux-wake-lock"]), False)
+check("a shell is not", cn.is_termux_api_call(["bash", "-l"]), False)
+check("a bounded call carries its deadline", cn.bounded(["termux-toast", "x"])[:1], ["timeout"])
+_rows = [(1, 500.0, ["termux-api", "Notification"]),      # old and hung
+         (2, 5.0, ["termux-api", "Notification"]),        # young: still working
+         (3, 500.0, ["python3", "server.py"])]            # old, not ours
+_killed = []
+cn.os.kill, _real_kill = (lambda pid, sig: _killed.append(pid)), cn.os.kill
+check("reap takes the old Termux:API call and nothing else",
+      cn.reap(stale=120, procs=_rows), [1])
+cn.os.kill = _real_kill
+# and for real: an orphan called termux-api that will never finish
+_sp2.run(["bash", "-c", "(exec -a termux-api python3 -c 'import time; time.sleep(300)' &)"], timeout=10)
+time.sleep(0.5)
+_mine = [pid for pid, age, argv in cn.orphans() if argv[:1] == ["termux-api"] and "-c" in argv]
+check("the orphan is seen with its parent as pid 1", len(_mine) >= 1, True)
+check("younger than the limit, it is left alone", [q for q in cn.reap(stale=60) if q in _mine], [])
+_got = cn.reap(stale=0)
+check("older than the limit, it is reaped", all(p in _got for p in _mine), True)
+time.sleep(0.5)
+check("and it is gone", any(pid in [q for q, _, _ in cn.orphans()] for pid in _mine), False)
+
+print("folders - the rule, its order, the override, and the name")
+def _fake(name, cmd=None, path="/root/.x", loose=False, orphan=False):
+    a = m.App(name, path)
+    a.cmds = [(cmd, "/bin")] if cmd else []
+    a.loose, a.orphan = loose, orphan
+    return a
+check("commute by command", m.default_folder(_fake("nightcommute", "night.commute", "/root/.nightcommute")), "Commute")
+check("commute wins when a later rule also matches",
+      m.default_folder(_fake("commute-tts", "commute-tts")), "Commute")
+check("transcribe by command", m.default_folder(_fake("MAHA_TRANSCRIBE_TERMUX_TERMINAL", "transcribe")), "Transcribe & speech")
+check("tts before reader: first rule wins", m.default_folder(_fake("tts_reader", "tts", "/root/.tts_reader")), "Transcribe & speech")
+check("reader by folder name", m.default_folder(_fake("MA Reader", "mareadweb", "/root/.maread-web")), "Read & play")
+check("player with no folder", m.default_folder(_fake("MA Player", "maplayerweb", None)), "Read & play")
+check("an editor is a tool", m.default_folder(_fake("tpedit", "tpedit", "/root/.tpedit")), "Tools")
+check("shops & pools is a tool", m.default_folder(_fake("Shops & Pools", "mafinder", "/root/.mafinder")), "Tools")
+check("a loose .py is an experiment", m.default_folder(_fake("test_server.py", None, "/root/test_server.py", loose=True)), m.LOOSE_FOLDER)
+check("nothing matches -> Other", m.default_folder(_fake("zzz", "zzz")), m.OTHER_FOLDER)
+check("an orphan is always Orphans, whatever its name", m.default_folder(_fake("nightcommute", None, None, orphan=True)), m.ORPHAN_FOLDER)
+_a = _fake("tpedit", "tpedit", "/root/.tpedit")
+check("an override wins over the rule", m.folder_of(_a, {"/root/.tpedit": "Mine"}), "Mine")
+check("an override for another app is ignored", m.folder_of(_a, {"/root/.other": "Mine"}), "Tools")
+check("an empty override table falls back to the rule", m.folder_of(_a, {}), "Tools")
+check("clean: whitespace collapsed", m.clean_folder_name("  a \n\t b  "), "a b")
+check("clean: bounded", len(m.clean_folder_name("x" * 200)), m.FOLDER_NAME_MAX)
+check("clean: not a string", m.clean_folder_name(None), "")
+check("clean: empty", m.clean_folder_name("   "), "")
+_x, _y, _z = _fake("a", "a", "/root/.a"), _fake("b", "b", "/root/.b"), _fake("c", None, None, orphan=True)
+_x.runs, _y.runs, _z.runs = 2, 9, 50
+_x.folder, _y.folder, _z.folder = "Tools", "Commute", m.ORPHAN_FOLDER
+_fs = m.group_folders([_x, _y, _z])
+check("most-run folder first", [f.name for f in _fs][:2], ["Commute", "Tools"])
+check("orphans last even with more runs", _fs[-1].name, m.ORPHAN_FOLDER)
+check("a folder's runs are its apps' runs added up", _fs[0].runs, 9)
+check("counts add up to the apps", sum(len(f.apps) for f in _fs), 3)
+_saved = m.CATEGORIES_FILE
+m.CATEGORIES_FILE = os.path.join(m.HOME, ".zz_t1_categories.json")
+for junk, want in (('{"/root/.a": "Mine"}', {"/root/.a": "Mine"}),
+                   ('{"/root/.a": ""}', {}), ('{"/root/.a": 5}', {}),
+                   ('[]', {}), ('not json', {}), ('', {}),
+                   ('{"/root/.a": "' + "y" * 100 + '"}', {"/root/.a": "y" * 32})):
+    open(m.CATEGORIES_FILE, "w").write(junk)
+    check(f"load_categories on {junk[:22]!r}", m.load_categories(), want)
+os.remove(m.CATEGORIES_FILE)
+m.CATEGORIES_FILE = _saved
 
 print(f"\n{count} assertions, {len(fails)} failures")
 for f in fails:

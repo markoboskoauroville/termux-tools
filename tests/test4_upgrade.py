@@ -47,7 +47,7 @@ def load(name):
 BACKUP = "/tmp/mamc_state_backup"
 shutil.rmtree(BACKUP, ignore_errors=True)
 os.makedirs(BACKUP)
-for f in ("runs.json", "important.json"):
+for f in ("runs.json", "important.json", "categories.json"):
     if os.path.exists(os.path.join(MAMC, f)):
         shutil.copy2(os.path.join(MAMC, f), BACKUP)
 new_source = open(CUR).read()
@@ -70,6 +70,10 @@ try:
     old_source = old_source.replace(
         'IMPORTANT_FILE = os.path.join(MAMC_DIR, "important.json")',
         'IMPORTANT_FILE = os.path.join(MAMC_DIR, "important.json")\nOLD_VERSION = True')
+    # and the previous version knew nothing of folders: no categories.json
+    cats = os.path.join(MAMC, "categories.json")
+    if os.path.exists(cats):
+        os.remove(cats)
     import ast as _ast; _ast.parse(old_source)
     open(CUR, "w").write(old_source)
     old = load("mamc_old")
@@ -146,6 +150,19 @@ try:
                           capture_output=True, text=True).stdout.strip()
     check("nothing of it is left", left == "", f"-> {left!r}")
 
+    print("  -- folders arrive on a phone that never had them --")
+    check("no categories.json was needed to start", not os.path.exists(cats))
+    check("every app the old version knew is filed somewhere",
+          all(a.folder for a in apps.values()))
+    check("the fixture app landed in a folder by rule",
+          apps[fixture].folder == new.OTHER_FOLDER, apps[fixture].folder)
+    check("merely looking does not write categories.json", not os.path.exists(cats))
+    new.CATEGORIES[fixture] = "Moved"
+    new.save_categories(new.CATEGORIES)
+    check("a move writes it", os.path.exists(cats))
+    check("and the old flag and counts are untouched by that",
+          int(new.load_runs()[fixture]["count"]) == 7 and fixture in new.load_important())
+
     print("  -- doing it twice --")
     open(CUR, "w").write(new_source)
     new2 = load("mamc_new2")
@@ -161,10 +178,12 @@ try:
 finally:
     open(CUR, "w").write(new_source)
     shutil.rmtree(os.path.join(HOME, ".zz_upgrade"), ignore_errors=True)
-    for f in ("runs.json", "important.json"):
+    for f in ("runs.json", "important.json", "categories.json"):
         src = os.path.join(BACKUP, f)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(MAMC, f))
+        elif f == "categories.json" and os.path.exists(os.path.join(MAMC, f)):
+            os.remove(os.path.join(MAMC, f))
     mod = load("mamc_cleanup")
     for slot, mf in mod.list_trash():
         if mf["name"] in ("zz_upgrade", "zz_ghost"):
