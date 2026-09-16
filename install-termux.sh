@@ -1,5 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Install mamc, talk and ccnotify in Termux. One command:
+#   gh api repos/markoboskoauroville/termux-tools/contents/install-termux.sh -H 'Accept: application/vnd.github.raw' | bash
+#
+# Through gh, because this repository is PRIVATE and raw.githubusercontent.com
+# answers 404 without a token. The curl form below is what to use if it is
+# ever made public, and it did not work while this line claimed it did:
 #   curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/install-termux.sh | bash
 #
 #   bash install-termux.sh          clone or pull ~/termux-tools, then the link step

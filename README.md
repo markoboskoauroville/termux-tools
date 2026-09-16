@@ -1,5 +1,25 @@
 # Termux tools
 
+```sh
+gh api repos/markoboskoauroville/termux-tools/contents/install-termux.sh \
+  -H 'Accept: application/vnd.github.raw' | bash
+```
+
+That is the whole install. It fetches the installer, which clones this
+repository to `~/termux-tools` and puts `mamc`, `talk`, `ccnotify` and `ccpush`
+on the PATH. Then type `mamc`.
+
+**It goes through `gh` rather than `curl` because this repository is private**,
+and `raw.githubusercontent.com` answers 404 to anyone without a token. Run
+`gh auth login` once and the line above works. Were this repository ever made
+public, the plain curl form would work and is shorter:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/install-termux.sh | bash
+```
+
+---
+
 Three programs built on the phone, inside Termux + PRoot.
 
     mamc      a Midnight Commander for every app on this phone, in folders:
