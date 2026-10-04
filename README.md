@@ -22,14 +22,16 @@ curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/ma
 
 Three programs built on the phone, inside Termux + PRoot.
 
-    mamc      a Midnight Commander for every app on this phone, in folders:
-              open one, run an app (the run screen is its terminal: every key
-              reaches it; Ctrl-C or Esc Esc stops it), o opens its page in
-              Chrome, c moves it, d uninstalls it into a restorable trash,
-              u updates mamc itself from GitHub
-    talk      Claude's replies spoken aloud in Beatrice's voice, on a code word
-    ccnotify  a notification when Claude stops or needs you, with a button
-              that pushes "continue" into the session from the lock screen
+```
+mamc      a Midnight Commander for every app on this phone, in folders:
+          open one, run an app (the run screen is its terminal: every key
+          reaches it; Ctrl-C or Esc Esc stops it), o opens its page in
+          Chrome, c moves it, d uninstalls it into a restorable trash,
+          u updates mamc itself from GitHub
+talk      Claude's replies spoken aloud in Beatrice's voice, on a code word
+ccnotify  a notification when Claude stops or needs you, with a button
+          that pushes "continue" into the session from the lock screen
+```
 
 The environment they were built in, and everything it does differently, is
 `modules/termux-proot-working.md` in MANTRA_MANIFEST. Read that first if
@@ -395,11 +397,13 @@ Originals of every app file edited are in `~/.mamc/gate-backups/`.
 
 ## Budgets
 
-    discover()          3.5 s mean over 22 apps, best 2.9 s (was 1.9 s over 21) — measured with 7.5 of
-                        7.6 GB RAM in use and 3.6 GB of swap; whether the code or the phone is slower is not known
-    mamc --list, cold   4.0 s (was 2.4 s), same caveat
-    source              mamc 2015 lines (was 1511), talker 514, ccnotify 447, tests/vt.py 210
-    dependencies        stdlib only, plus Termux:API for the bubbles
+```
+discover()          3.5 s mean over 22 apps, best 2.9 s (was 1.9 s over 21) — measured with 7.5 of
+                    7.6 GB RAM in use and 3.6 GB of swap; whether the code or the phone is slower is not known
+mamc --list, cold   4.0 s (was 2.4 s), same caveat
+source              mamc 2015 lines (was 1511), talker 514, ccnotify 447, tests/vt.py 210
+dependencies        stdlib only, plus Termux:API for the bubbles
+```
 
 ## What is NOT claimed
 
