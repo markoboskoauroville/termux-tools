@@ -36,7 +36,7 @@ def sh(*cmd, cwd=None, env=None):
 def env_for(home=HOME):
     path = ":".join([BIN, FAKE_BIN, os.path.dirname(sys.executable), "/usr/bin", "/bin"])
     return dict(GENV, HOME=home, PATH=path, CL_BIN=BIN, CL_LOCAL_BIN=LBIN,
-                CL_REPO_URL=BARE, CL_BRANCH="main", CL_INSTALL_DIR=os.path.join(home, "termux-tools"),
+                CL_REPO_URL=BARE, CL_BRANCH="main",
                 FAKE_DIR=T, FAKE_PACKAGES="org.mozilla.firefox")
 
 
@@ -54,6 +54,10 @@ try:
     sh("git", "clone", "-q", BARE, WORK)
     shutil.copytree(APP_DIR, os.path.join(WORK, "claudelogin"),
                     ignore=shutil.ignore_patterns("__pycache__"))
+    # the rest of the suite, which installing claudelogin alone must not bring
+    os.makedirs(os.path.join(WORK, "mamc"))
+    open(os.path.join(WORK, "mamc", "mamc.py"), "w").write("# mamc\n")
+    open(os.path.join(WORK, "install-termux.sh"), "w").write("# the suite's installer\n")
     sh("git", "checkout", "-q", "-b", "main", cwd=WORK)
     sh("git", "add", "-A", cwd=WORK)
     sh("git", "commit", "-qm", "v1", cwd=WORK)
@@ -67,11 +71,19 @@ try:
     os.chmod(stale, 0o755)
     old_inode = os.stat(stale).st_ino
 
+    # a ~/termux-tools checkout the phone already has (mamc's): installing claudelogin leaves it be
+    os.makedirs(os.path.join(HOME, "termux-tools"))
+    open(os.path.join(HOME, "termux-tools", "mine"), "w").write("untouched\n")
+
     # 1. the installer, for real, from the GitHub on disk
     r = sh("bash", os.path.join(WORK, "claudelogin", "install.sh"), env=env_for())
     check("install: exits 0", r.returncode == 0, r.stdout[-500:] + r.stderr[-500:])
     check("install: the dependency table came first", r.stdout.find("python") < r.stdout.find("done"))
-    check("install: cloned into ~/termux-tools", os.path.isfile(os.path.join(HOME, "termux-tools", "claudelogin", "claudelogin.py")))
+    check("install: cloned into ~/claudelogin", os.path.isfile(os.path.join(HOME, "claudelogin", "claudelogin", "claudelogin.py")))
+    on_disk = sorted(f for f in os.listdir(os.path.join(HOME, "claudelogin")) if f != ".git")
+    check("install: ONLY claudelogin is on disk, not the suite", on_disk == ["claudelogin"], on_disk)
+    check("install: ~/termux-tools left as it was", os.listdir(os.path.join(HOME, "termux-tools")) == ["mine"])
+    check("install: no half-made folder left", not os.path.exists(os.path.join(HOME, "claudelogin.new")))
     for d in (BIN, LBIN):
         p = os.path.join(d, "claudelogin")
         check("install: %s/claudelogin is there and executable" % os.path.basename(d), os.access(p, os.X_OK))
@@ -90,18 +102,24 @@ try:
     check("install: the command runs: v1", version_via(HOME) == "claudelogin v1", version_via(HOME))
     # the other spelling of home: the same command, a different $HOME holding the app
     OTHER = os.path.join(T, "other-home")
-    shutil.copytree(os.path.join(HOME, "termux-tools"), os.path.join(OTHER, "termux-tools"), symlinks=True)
-    ov = os.path.join(OTHER, "termux-tools", "claudelogin", "version.py")
+    shutil.copytree(os.path.join(HOME, "claudelogin"), os.path.join(OTHER, "claudelogin"), symlinks=True)
+    ov = os.path.join(OTHER, "claudelogin", "claudelogin", "version.py")
     text = open(ov).read()
     open(ov, "w").write(re.sub(r"(?m)^APP_VERSION = \d+", "APP_VERSION = 99", text))
     check("install: from another home it runs THAT home's copy", version_via(OTHER) == "claudelogin v99", version_via(OTHER))
     EMPTY = os.path.join(T, "empty-home")
     os.makedirs(EMPTY)
     out = version_via(EMPTY)
-    if os.path.exists("/root/termux-tools/claudelogin/claudelogin.py") or os.path.exists("/data/data/com.termux/files/home/termux-tools/claudelogin/claudelogin.py"):
+    if os.path.exists("/root/claudelogin/claudelogin/claudelogin.py") or os.path.exists("/data/data/com.termux/files/home/claudelogin/claudelogin/claudelogin.py"):
         print("  (skipped: this machine has a real install, so 'not found' cannot be shown)")
     else:
-        check("install: where it is not, it names the places it tried", "not found in" in out and "/root/termux-tools/claudelogin" in out, out)
+        check("install: where it is not, it names the places it tried", "not found in" in out and "/root/claudelogin/claudelogin" in out, out)
+
+    # a ~/claudelogin that is somebody's own folder: refused, not nested into
+    THEIRS = os.path.join(T, "theirs-home")
+    os.makedirs(os.path.join(THEIRS, "claudelogin"))
+    r = sh("bash", os.path.join(WORK, "claudelogin", "install.sh"), env=env_for(THEIRS))
+    check("install: a ~/claudelogin that is not a checkout is refused", r.returncode == 1 and "is not a checkout" in r.stdout and os.listdir(os.path.join(THEIRS, "claudelogin")) == [], r.stdout[-300:])
 
     # 2. the installer again, unchanged: changes nothing
     before = open(stale).read()

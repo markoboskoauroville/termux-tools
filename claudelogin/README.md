@@ -1,25 +1,26 @@
 # claudelogin
 
-**One word in Termux signs Claude Code in.** The sign-in link opens in Firefox by itself, and the
-code is pasted into Claude for you as soon as you tap **Copy Code**.
-
-## How to install
-
-In Termux (the repository is private, so this borrows the `gh` login already on the phone):
-
-```
-gh api 'repos/markoboskoauroville/termux-tools/contents/claudelogin/install.sh?ref=main' -H 'Accept: application/vnd.github.raw' | bash
+```sh
+curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/claudelogin/install.sh | bash
 ```
 
-Until this branch is merged into `main`, install it from the branch instead. It goes into its own
-folder, `~/claudelogin-preview`, so the `~/termux-tools` checkout that mamc updates is not touched:
+That is the whole install, in Termux. It fetches **claudelogin alone** into `~/claudelogin` (not
+mamc, talk or ccnotify, and an existing `~/termux-tools` is left as it is), installs Flask, and
+puts `claudelogin` on the PATH. Then type `claudelogin`.
 
-```
-gh api 'repos/markoboskoauroville/termux-tools/contents/claudelogin/install.sh?ref=ccr-00a8eb51-cly4sv' -H 'Accept: application/vnd.github.raw' | CL_BRANCH=ccr-00a8eb51-cly4sv CL_INSTALL_DIR="$HOME/claudelogin-preview" bash
+**One word signs Claude Code in.** The sign-in link opens in Firefox by itself, and the code is
+pasted into Claude for you as soon as you tap **Copy Code**.
+
+The curl line works once this repository is public and this folder is on `main`. Until then,
+through the `gh` login already on the phone, from the branch:
+
+```sh
+gh api 'repos/markoboskoauroville/termux-tools/contents/claudelogin/install.sh?ref=ccr-00a8eb51-cly4sv' -H 'Accept: application/vnd.github.raw' | CL_BRANCH=ccr-00a8eb51-cly4sv bash
 ```
 
-It checks Python, git, `claude`, Termux:API and Firefox, installs Flask and Waitress, clones (or
-pulls) `~/termux-tools`, and writes the `claudelogin` command into `$PREFIX/bin` and `~/.local/bin`.
+    README.md       this: install, use, the keys
+    HANDOVER.md     for the next session: what was decided, what is NOT tested
+    tests/          the four tests, run_all.py
 
 ## How to use it
 

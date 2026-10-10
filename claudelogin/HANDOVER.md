@@ -1,6 +1,6 @@
 # HANDOVER: claudelogin (10.10.2026)
 
-Version: `version.py`, one whole number, v1. It lives in `termux-tools/claudelogin/` for now,
+Version: `version.py`, one whole number, v2. It lives in `termux-tools/claudelogin/` for now,
 because the session that built it could not create a repository (GitHub answered 403). The folder
 is self-contained: its own installer, version, tests and documents. **It is meant to become its
 own repository**: once Marko creates one (an empty `CLAUDE_LOGIN_TERMUX`, say), move the folder
@@ -42,6 +42,18 @@ exits 0 it says "signed in", and Enter execs `claude` in the same folder.
   nothing and only one tab opens.
 * **Nothing is stored.** No log of claude's output, because the pty echoes the code into it.
 
+## How it installs (v2)
+
+`install.sh` clones termux-tools with `--filter=blob:none --no-checkout`, then
+`sparse-checkout set --no-cone /claudelogin/`: only this folder is downloaded and put on disk, in
+`~/claudelogin` (so the app is `~/claudelogin/claudelogin/`). The clone is made beside its name
+and renamed into place; a `~/claudelogin` that is not a checkout is refused. The u key's
+`git pull` works inside the sparse checkout (Test 4).
+
+The curl line in README.md needs two things: termux-tools **public** (scanned 10.10.2026 by
+going-public.md: 12 commits, 3 branches, 0 keys) and this folder **merged into main**. Neither is
+done; both are Marko's.
+
 ## The files
 
     claudelogin.py        the whole program: the Login (pty), the opener, the clipboard watch,
@@ -77,6 +89,8 @@ was driven in headless Chromium at 390 px: no script errors, no sideways scroll.
 * **`termux-clipboard-get` speed on the phone**: each call is 3-5 s (proot-working §3); the code
   can take that long to be noticed.
 * Firefox on the phone showing the local page; the layout was seen only in Chromium.
+* The curl line itself: it 404s until the repository is public and the folder is on main. The
+  sparse clone was proven against a GitHub on disk, not against github.com.
 
 **Marko's test, one line:** type `claudelogin` in Termux, sign in, tap Copy Code, come back to
 Termux. Expected: "signed in", then Enter starts claude.

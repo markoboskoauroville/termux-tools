@@ -21,9 +21,15 @@ curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/ma
 ---
 
 **New, 10.10.2026: [`claudelogin/`](claudelogin/README.md)**, one word that signs Claude Code in:
-the link opens in Firefox and the code is pasted for you. It has its own installer, version and
-tests, and is parked here until it has a repository of its own; it does not ship with the three
-below and `install-termux.sh` does not install it.
+the link opens in Firefox and the code is pasted for you. It installs **on its own**, without the
+three below (its installer fetches only its folder):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/claudelogin/install.sh | bash
+```
+
+(That line, like the one above it, works once this repository is public; claudelogin/README.md
+has the `gh` form for today.)
 
 Three programs built on the phone, inside Termux + PRoot.
 

@@ -1,6 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Install claudelogin in Termux. One command (README.md has it with a copy button):
-#   gh api repos/markoboskoauroville/termux-tools/contents/claudelogin/install.sh -H 'Accept: application/vnd.github.raw' | bash
+# Install claudelogin in Termux, and ONLY claudelogin. One command (README.md has it with a copy button):
+#   curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/claudelogin/install.sh | bash
+#
+# It fetches the claudelogin/ folder alone into ~/claudelogin (a sparse checkout of termux-tools:
+# mamc, talk and ccnotify are not downloaded, and an existing ~/termux-tools is never touched).
 #
 #   bash install.sh          clone or pull the checkout, the Python packages, then the link step
 #   bash install.sh link     only the link step, from the checkout this file is in
@@ -14,7 +17,7 @@
 set -euo pipefail
 REPO_URL="${CL_REPO_URL:-https://github.com/markoboskoauroville/termux-tools.git}"
 BRANCH="${CL_BRANCH:-main}"
-INSTALL_DIR="${CL_INSTALL_DIR:-$HOME/termux-tools}"
+INSTALL_DIR="${CL_INSTALL_DIR:-$HOME/claudelogin}"
 # CL_BIN and CL_LOCAL_BIN exist for the tests, which must never rewrite the real command
 BIN="${CL_BIN:-${PREFIX:-/data/data/com.termux/files/usr}/bin}"
 LOCAL_BIN="${CL_LOCAL_BIN:-$HOME/.local/bin}"
@@ -89,8 +92,22 @@ fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" pull -q --ff-only origin "$BRANCH" || { printf "  ${BAD}git pull failed${OFF}, nothing changed\n"; exit 1; }
+elif [ -e "$INSTALL_DIR" ]; then
+  printf "  ${BAD}$INSTALL_DIR exists and is not a checkout${OFF}: move it away, nothing changed\n"; exit 1
 else
-  git clone -q -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR" || { printf "  ${BAD}clone failed${OFF}: a private repository needs gh auth login; is there a network?\n"; exit 1; }
+  # nothing on disk until the clone is whole: clone beside the name, rename into place
+  rm -rf "$INSTALL_DIR.new"
+  # --filter=blob:none: the other apps' files are never downloaded (a server that cannot filter
+  # sends them and git says so; the sparse checkout below still keeps them off the disk)
+  if ! git clone -q --filter=blob:none --no-checkout -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR.new" 2>/dev/null \
+     && ! git clone -q --no-checkout -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR.new"; then
+    rm -rf "$INSTALL_DIR.new"
+    printf "  ${BAD}clone failed${OFF}: is there a network? (a private repository also needs gh auth login)\n"; exit 1
+  fi
+  git -C "$INSTALL_DIR.new" sparse-checkout set --no-cone '/claudelogin/' \
+    && git -C "$INSTALL_DIR.new" checkout -q "$BRANCH" \
+    || { rm -rf "$INSTALL_DIR.new"; printf "  ${BAD}checkout failed${OFF}, nothing changed\n"; exit 1; }
+  mv "$INSTALL_DIR.new" "$INSTALL_DIR"
 fi
 link_step "$INSTALL_DIR/claudelogin"
 printf "\n  type  ${AM}claudelogin${OFF}  anywhere.\n\n"
