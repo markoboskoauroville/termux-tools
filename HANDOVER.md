@@ -14,6 +14,10 @@ together: **mamc**, a Midnight Commander for every app on this phone; **talk**, 
 spoken aloud; **ccnotify**, a notification when Claude stops or needs you. The environment they
 run in and everything it does differently is `modules/termux-proot-working.md` in MANTRA_MANIFEST.
 
+**claudelogin/** (10.10.2026) is a fourth, separate app parked in this repository until it has
+its own (the session could not create one). It is self-contained: `claudelogin/HANDOVER.md`.
+Nothing above installs, updates or tests it, and its tests are `claudelogin/tests/run_all.py`.
+
 ## Where it runs
 
     mamc                        ~/termux-tools/mamc/mamc.py, through the wrappers $PREFIX/bin/mamc and

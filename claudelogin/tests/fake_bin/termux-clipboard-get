@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# stand-in: the clipboard is a file. FAKE_CLIP_HANG=1: never answers, like Termux:API swapped out
+[ -n "${FAKE_CLIP_HANG:-}" ] && sleep 3600
+cat "$FAKE_DIR/clip" 2>/dev/null || true

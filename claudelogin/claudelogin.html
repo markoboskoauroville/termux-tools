@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claudelogin v{{VERSION}}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  /* the AGY look (design-language.md §3): dark ground, sand ink, amber for the thing in force,
+     green for on, red only for a real fault, monospace everywhere. Nothing appears or
+     disappears: every control is always on the page, grey when it cannot act. */
+  :root { --ground:#0B0D10; --surface:#141A21; --slate:#23303D; --sand:#F2DDB4;
+          --amber:#F59E0B; --green:#22C55E; --red:#EF4444; --grey:#6B7280; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--sand);
+         font:16px/1.45 ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace;
+         padding:max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width:560px; margin:0 auto; }
+  h1 { font-size:18px; margin:0 0 16px; font-weight:600; }
+  h1 span { color:var(--grey); font-weight:400; }
+  .state { background:var(--surface); border-radius:12px; padding:14px 16px; margin-bottom:16px;
+           min-height:84px; }
+  .state b { display:block; font-size:20px; margin-bottom:4px; }
+  .state small { color:var(--grey); word-break:break-word; }
+  .starting b, .checking b { color:var(--amber); }
+  .waiting b { color:var(--amber); }
+  .signed_in b { color:var(--green); }
+  .failed b { color:var(--red); }
+  label { display:block; margin:18px 0 6px; color:var(--grey); font-size:14px; }
+  textarea { width:100%; min-height:88px; background:var(--surface); color:var(--sand);
+             border:1px solid var(--slate); border-radius:10px; padding:10px 12px;
+             font:inherit; resize:vertical; }
+  button { display:block; width:100%; min-height:48px; margin:10px 0 0; border:0;
+           border-radius:10px; background:var(--slate); color:var(--sand); font:inherit;
+           font-size:16px; text-align:left; padding:0 16px; }
+  button.go { background:var(--amber); color:var(--ground); font-weight:600; }
+  button:disabled { opacity:.35; }
+  .note { color:var(--grey); font-size:13px; margin-top:22px; }
+  .err { color:var(--red); min-height:1.45em; margin-top:8px; font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>claudelogin <span>v{{VERSION}}</span></h1>
+
+  <div id="state" class="state starting"><b id="headline">starting claude auth login</b>
+    <small id="detail">claude is starting</small></div>
+
+  <button id="open">&#8599;&nbsp; open the sign-in page again</button>
+
+  <label for="code">the code from the sign-in page</label>
+  <textarea id="code" autocomplete="off" autocapitalize="off" spellcheck="false"
+            placeholder="paste it here"></textarea>
+  <button id="send" class="go">&#10148;&nbsp; send this code to claude</button>
+  <button id="clip">&#9112;&nbsp; send what is in the clipboard</button>
+  <div id="err" class="err"></div>
+
+  <button id="restart">&#8635;&nbsp; start again with a new link</button>
+
+  <p class="note">Tapping <b>Copy Code</b> on Claude's page is usually enough: claudelogin is
+    watching the clipboard and sends the code itself. This page is for when it does not.
+    It answers on 127.0.0.1 only.</p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const HEAD = {
+  idle:      ["not started", ""],
+  starting:  ["starting claude auth login", "claude is starting; on a phone this takes seconds"],
+  waiting:   ["waiting for the code", "sign in, then tap Copy Code on the page that shows it"],
+  checking:  ["checking the code", ""],
+  signed_in: ["signed in", "go back to Termux: Enter starts claude"],
+  failed:    ["not signed in", ""],
+};
+let last = {};
+
+// every call goes through this one helper, so the guard header is on GETs too (termux-app.md §13)
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {"X-Claudelogin": "1", "Content-Type": "application/json"},
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error("the app answered " + r.status);
+  return r.json();
+}
+
+function show(s) {
+  last = s;
+  const [head, hint] = HEAD[s.state] || [s.state, ""];
+  $("state").className = "state " + s.state;
+  $("headline").textContent = head;
+  let detail = s.message || hint;
+  if (s.state === "checking" && s.source) detail = "sent from " + s.source;
+  if (s.state === "waiting" && !s.clipboard) detail = "sign in, then paste the code below";
+  $("detail").textContent = detail;
+  const waiting = s.state === "waiting";
+  $("send").disabled = !waiting;
+  $("clip").disabled = !waiting || !s.clipboard;
+  $("open").disabled = !s.url || s.state === "signed_in";
+}
+
+async function poll() {
+  try { show(await api("/api/state")); }
+  catch (e) { $("detail").textContent = "claudelogin is not answering: is it still running in Termux?"; }
+}
+
+async function act(path, body) {
+  $("err").textContent = "";
+  try {
+    const r = await api(path, body);
+    if (!r.ok && r.error) $("err").textContent = r.error;
+    show(r);
+    return r;
+  } catch (e) { $("err").textContent = e.message; }
+}
+
+$("send").onclick = async () => {
+  const r = await act("/api/code", {code: $("code").value});
+  if (r && r.ok) $("code").value = "";
+};
+$("clip").onclick = () => act("/api/clipboard", {});
+$("open").onclick = () => act("/api/open", {});
+$("restart").onclick = () => act("/api/restart", {});
+
+// poll while the page is on screen, not while it sits in a background tab (termux-app.md §13)
+poll();
+setInterval(() => { if (!document.hidden) poll(); }, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""A stand-in for `claude auth login`, printing what Claude Code 2.1.296 printed on a pty on
+10.10.2026 (tests/fixture_auth_login.repr), with a fresh state each run.
+
+    FAKE_DIR/state      the state this run put in its link (the tests build the right code from it)
+    FAKE_DIR/argv       the arguments it was started with, one run per line
+    FAKE_DELAY          seconds before printing anything (a slow proot start)
+    FAKE_SILENT=1       never print a link (claude that hangs)
+    FAKE_EXIT_EARLY=1   print an error and exit 1 before any link
+
+The right code is <anything of 8+ url-safe chars>#<state>: then "Login successful." and exit 0.
+Anything else: "Login failed: Request failed with status code 400" and exit 1, as measured.
+Started with no arguments (claude itself, after signing in) it writes FAKE_DIR/started and exits.
+"""
+import os, secrets, sys, time
+d = os.environ.get("FAKE_DIR", ".")
+with open(os.path.join(d, "argv"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+if sys.argv[1:] != ["auth", "login"]:
+    open(os.path.join(d, "started"), "w").write(os.getcwd())
+    sys.exit(0)
+open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
+time.sleep(float(os.environ.get("FAKE_DELAY") or 0))
+if os.environ.get("FAKE_EXIT_EARLY"):
+    sys.stdout.write("Error: something went wrong before the link\r\n"); sys.stdout.flush(); sys.exit(1)
+if os.environ.get("FAKE_SILENT"):
+    sys.stdout.write("starting...\r\n"); sys.stdout.flush(); time.sleep(3600)
+state = secrets.token_urlsafe(32)
+open(os.path.join(d, "state"), "w").write(state)
+url = ("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+       "&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+       "&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge="
+       + secrets.token_urlsafe(32) + "&code_challenge_method=S256&state=" + state)
+out = ("Opening browser to sign in…\r\nIf the browser didn't open, visit: \x1b]8;;" + url + "\x07\x1b[94m"
+       + url + "\x1b[39m\x1b]8;;\x07\r\nPaste code here if prompted > ")
+# written in two halves, cut inside the link, as a pty read may cut it
+b = out.encode()
+os.write(1, b[:150]); time.sleep(0.3); os.write(1, b[150:])
+line = sys.stdin.readline().strip()
+head, _, tail = line.rpartition("#")
+if tail == state and len(head) >= 8:
+    sys.stdout.write("Login successful.\r\n"); sys.stdout.flush(); sys.exit(0)
+sys.stdout.write("Login failed: Request failed with status code 400\r\n\x1b[?25h"); sys.stdout.flush()
+sys.exit(1)

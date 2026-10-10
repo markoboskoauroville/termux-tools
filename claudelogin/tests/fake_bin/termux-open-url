@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# stand-in: writes what it was asked to open. FAKE_OPEN_FAIL=1 answers like am with no such package
+echo "$*" >> "$FAKE_DIR/opened"
+if [ -n "${FAKE_OPEN_FAIL:-}" ] && [ $# -ge 2 ]; then echo "Error: Activity not started, unable to resolve Intent"; exit 0; fi
+echo "Starting: Intent { act=android.intent.action.VIEW }"
