@@ -1,0 +1,151 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# phonelink: the tester's hands on this phone, with or without Wi-Fi.
+#
+# Marko, 12.10.2026: "I will be out in the open with only my connection with
+# SIM card ... I want the testing continues ... Once it's set up, it's forever."
+#
+# Wireless debugging dies without Wi-Fi. Two paths do not need it:
+#   1. adb over the phone's own loopback, 127.0.0.1:5555 (after `adb tcpip 5555`
+#      once; lasts until a reboot)
+#   2. Shizuku's shell (rish): a shell-user shell over Binder, no network at all
+#      (after Shizuku's server was started once; lasts until a reboot)
+# Every command goes through whichever is alive, adb first.
+#
+#   phonelink sh 'input tap 300 400'      a command on the phone, as the shell user
+#   phonelink exec-out 'screencap -p' > x.png
+#   phonelink install app.apk
+#   phonelink status                      which paths are alive
+#   phonelink watch                       keep both alive (a loop, every 60 s)
+#
+# After a reboot one start over Wi-Fi debugging (or USB) is needed again:
+# Android allows nothing else on an unrooted phone. `phonelink watch` does it by
+# itself the moment Wireless debugging is reachable.
+set -u
+
+DEX=/data/data/com.termux/files/usr/bin/rish_shizuku.dex
+LOOP=127.0.0.1:5555
+LOG=${PHONELINK_LOG:-$HOME/.cache/phonelink.log}
+mkdir -p "$(dirname "$LOG")"
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# the adb serial of a connected device ("device" state), loopback first
+adb_serial() {
+    local list
+    list=$(timeout 10 adb devices 2>/dev/null | awk '$2 == "device" {print $1}')
+    if grep -qx "$LOOP" <<< "$list"; then
+        echo "$LOOP"
+    else
+        head -1 <<< "$list"
+    fi
+}
+
+# app_process straight, not the rish script: inside a PRoot its "is the dex
+# writable" test is always true (fake root) and it refuses to start. An array,
+# so `timeout` can run it (timeout cannot run a shell function)
+export RISH_APPLICATION_ID=com.termux
+RISH=(/system/bin/app_process -Djava.class.path="$DEX" /system/bin --nice-name=rish
+    rikka.shizuku.shell.ShizukuShellLoader)
+
+rish() {
+    "${RISH[@]}" "$@"
+}
+
+rish_alive() {
+    [ "$(timeout 15 "${RISH[@]}" -c 'echo up' 2>/dev/null | tr -d '\r')" = "up" ]
+}
+
+start_shizuku() {
+    local serial=$1 path
+    path=$(timeout 10 adb -s "$serial" shell pm path moe.shizuku.privileged.api 2>/dev/null |
+        tr -d '\r' | sed 's/package://; s/base.apk$//')
+    [ -n "$path" ] || return 1
+    timeout 30 adb -s "$serial" shell "${path}lib/arm64/libshizuku.so" >> "$LOG" 2>&1
+}
+
+run_sh() {
+    local serial
+    serial=$(adb_serial)
+    if [ -n "$serial" ]; then
+        adb -s "$serial" shell "$@"
+    else
+        rish -c "$*"
+    fi
+}
+
+run_exec_out() {
+    local serial
+    serial=$(adb_serial)
+    if [ -n "$serial" ]; then
+        adb -s "$serial" exec-out "$@"
+    else
+        rish -c "$*"
+    fi
+}
+
+run_install() {
+    local apk=$1 serial size
+    serial=$(adb_serial)
+    if [ -n "$serial" ]; then
+        adb -s "$serial" install -r "$apk"
+    else
+        # pm reads the APK from stdin: the shell user may not read Termux's files
+        size=$(stat -c %s "$apk")
+        rish -c "pm install -r -S $size" < "$apk"
+    fi
+}
+
+status() {
+    local serial
+    serial=$(adb_serial)
+    echo "adb:     ${serial:-none}"
+    if rish_alive; then echo "shizuku: up"; else echo "shizuku: down"; fi
+}
+
+watch_once() {
+    local serial
+    serial=$(adb_serial)
+    if [ -z "$serial" ]; then
+        # the loopback port stays open until a reboot, even without Wi-Fi
+        timeout 10 adb connect "$LOOP" > /dev/null 2>&1
+        serial=$(adb_serial)
+        [ -n "$serial" ] && log "adb back on $serial"
+    fi
+    # two failed checks in a row before a restart: one slow answer is not a
+    # dead server, and a restart cuts every command running through it
+    if ! rish_alive && { sleep 5; ! rish_alive; }; then
+        if [ -n "$serial" ]; then
+            log "shizuku down: starting it over $serial"
+            start_shizuku "$serial"
+            sleep 3
+            rish_alive && log "shizuku up"
+        else
+            log "shizuku down and no adb: needs Wireless debugging once (after a reboot)"
+        fi
+    fi
+    if [ -n "$serial" ] && [ "$serial" != "$LOOP" ]; then
+        # a Wi-Fi debugging connection: open the loopback port for when Wi-Fi goes
+        if ! timeout 10 adb connect "$LOOP" 2>/dev/null | grep -q "connected"; then
+            log "opening the loopback port over $serial"
+            timeout 15 adb -s "$serial" tcpip 5555 >> "$LOG" 2>&1
+            sleep 3
+            timeout 10 adb connect "$LOOP" >> "$LOG" 2>&1
+        fi
+    fi
+}
+
+case "${1:-status}" in
+    sh) shift; run_sh "$@" ;;
+    exec-out) shift; run_exec_out "$@" ;;
+    install) shift; run_install "$1" ;;
+    status) status ;;
+    once) watch_once; status ;;
+    watch)
+        log "watch started (pid $$)"
+        while true; do
+            watch_once
+            sleep "${PHONELINK_EVERY:-60}"
+        done
+        ;;
+    *) sed -n 2,22p "$0"; exit 2 ;;
+esac
