@@ -45,6 +45,9 @@ exec python3 \"$here/mamc/mamc.py\" \"\$@\""
 exec python3 \"\$HOME/.talker/talker.py\" \"\$@\""
     put "$d" ccnotify "$SHEBANG
 exec python3 \"\$HOME/.ccnotify/ccnotify.py\" \"\$@\""
+    put "$d" claudelogin "$SHEBANG
+# claudelogin - log out and sign Claude Code in as a different account (private browser tab).
+exec bash \"$here/claudelogin/claudelogin\" \"\$@\""
     put "$d" ccpush  "$SHEBANG
 # ccpush TEXT - push a message into the running Claude Code session.
 exec python3 \"\$HOME/.ccnotify/ccnotify.py\" push \"\$@\""
@@ -58,7 +61,7 @@ exec python3 \"\$HOME/.ccnotify/ccnotify.py\" push \"\$@\""
   done
   cp "$here/notify/ccnotify.py" "$STATE_HOME/.ccnotify/ccnotify.py.new" && mv -f "$STATE_HOME/.ccnotify/ccnotify.py.new" "$STATE_HOME/.ccnotify/ccnotify.py"
   local v; v="$(sed -nE 's/^APP_VERSION *= *([0-9]+).*/\1/p' "$here/version.py" 2>/dev/null || true)"
-  printf "  ${OK}done${OFF}  termux-tools v${v:-?}: mamc, talk, ccnotify, ccpush on the PATH\n"
+  printf "  ${OK}done${OFF}  termux-tools v${v:-?}: mamc, talk, ccnotify, ccpush, claudelogin on the PATH\n"
 }
 
 if [ "${1:-}" = "link" ]; then

@@ -10,6 +10,8 @@ The three programs share one number because they ship together, from one reposit
 v1: 13.9.2026. Everything before it is the unnumbered delivery of the same day (the record in
     README.md). mamc reads each app's live port from ~/.mantra/ports, has the U key and
     --version, and is installed by the curl line.
+v2: 12.10.2026. claudelogin: logs out, then logs in through a private browser tab so the
+    browser cannot silently reuse the previous account.
 """
 
-APP_VERSION = 1
+APP_VERSION = 2

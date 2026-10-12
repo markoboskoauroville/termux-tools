@@ -1,0 +1,56 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# claudelogin - sign Claude Code in as a DIFFERENT account, every time.
+#
+# Why plain `claude` login keeps landing on the same account: the browser is still signed in to
+# claude.ai, so the authorize page approves the old account without asking. Two things fix it:
+#   1. log Claude Code out first, so no old token is reused;
+#   2. open the login URL in a PRIVATE tab, which has no claude.ai session to reuse.
+#
+#   claudelogin                 log out, then log in fresh (private tab)
+#   claudelogin --email a@b.c   same, with the email pre-filled
+#   claudelogin --console       log in with an API-billing Console account instead
+#   claudelogin --status        who am I signed in as
+#   claudelogin --logout        log out only
+set -uo pipefail
+CLAUDE_BIN="${CLAUDELOGIN_CLAUDE:-claude}"
+DIR="${CLAUDELOGIN_HOME:-$HOME/.claudelogin}"
+mkdir -p "$DIR"
+
+case "${1:-}" in
+  --status) exec "$CLAUDE_BIN" auth status --text ;;
+  --logout) "$CLAUDE_BIN" auth logout; rm -f "$HOME/.claude/.credentials.json"; echo "logged out"; exit 0 ;;
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+echo "==> logging out the current account"
+"$CLAUDE_BIN" auth logout >/dev/null 2>&1 || true
+# a stale token file would log the old account straight back in
+rm -f "$HOME/.claude/.credentials.json"
+
+# claude calls $BROWSER with the login URL. Ours records it and opens a private Chrome tab.
+OPENER="$DIR/open-private"
+cat > "$OPENER.new" <<'OPEN'
+#!/data/data/com.termux/files/usr/bin/bash
+url="$1"
+printf '%s\n' "$url" > "$HOME/.claudelogin/last-url"
+echo
+echo "  Open this in a PRIVATE / INCOGNITO tab and sign in to the account you want:"
+echo "  $url"
+echo
+# Chrome, new incognito tab. Silently does nothing where am is missing (inside proot).
+command -v am >/dev/null 2>&1 && am start -a android.intent.action.VIEW -d "$url" \
+  -n com.android.chrome/com.google.android.apps.chrome.Main \
+  --ez create_new_tab true --ez com.google.android.apps.chrome.EXTRA_OPEN_NEW_INCOGNITO_TAB true \
+  >/dev/null 2>&1
+exit 0
+OPEN
+chmod 755 "$OPENER.new" && mv -f "$OPENER.new" "$OPENER"
+
+echo "==> logging in (a private tab opens; if it does not, copy the URL printed below)"
+if BROWSER="$OPENER" "$CLAUDE_BIN" auth login --claudeai "$@"; then
+  echo "==> now signed in as:"
+  "$CLAUDE_BIN" auth status --text
+else
+  echo "login did not finish; run claudelogin again" >&2
+  exit 1
+fi
