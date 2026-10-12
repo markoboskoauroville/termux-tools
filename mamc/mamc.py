@@ -90,6 +90,9 @@ import subprocess
 import sys
 import threading
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import theme  # noqa: E402  the orange terminal, shared by every screen
 from collections import deque
 
 HOME = os.path.expanduser("~")
@@ -1342,21 +1345,9 @@ def init_colors():
     if not curses.has_colors():
         return False
     curses.start_color()
-    try:
-        curses.use_default_colors()
-        bg = -1
-    except Exception:
-        bg = curses.COLOR_BLACK
-    curses.init_pair(C_NORM, curses.COLOR_WHITE, bg)
-    curses.init_pair(C_SEL, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    curses.init_pair(C_HEAD, curses.COLOR_BLACK, curses.COLOR_WHITE)
-    curses.init_pair(C_DIM, curses.COLOR_BLUE, bg)
-    curses.init_pair(C_OK, curses.COLOR_GREEN, bg)
-    curses.init_pair(C_WARN, curses.COLOR_RED, bg)
-    curses.init_pair(C_BAR, curses.COLOR_YELLOW, bg)
-    curses.init_pair(C_KEY, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    curses.init_pair(C_IMP, curses.COLOR_MAGENTA, bg)
-    curses.init_pair(C_IMPSEL, curses.COLOR_BLACK, curses.COLOR_MAGENTA)
+    for n, role in enumerate(theme.ROLES, 1):
+        fg, bg = theme.colors()[role]
+        curses.init_pair(n, fg, bg)
     return True
 
 
@@ -1374,6 +1365,8 @@ class UI:
         self.msg_bad = False
         self.runner = Runner()
         self.color = init_colors()
+        if self.color:
+            scr.bkgd(" ", curses.color_pair(C_NORM))   # the whole screen is the orange terminal
 
     # -- drawing helpers ---------------------------------------------------
     def attr(self, pair, bold=False):

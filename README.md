@@ -18,6 +18,8 @@ public, the plain curl form would work and is shorter:
 curl -fsSL https://raw.githubusercontent.com/markoboskoauroville/termux-tools/main/install-termux.sh | bash
 ```
 
+Every screen is an orange terminal from the 1980s: `theme.py` is the one colour scheme.
+
 ---
 
 Three programs built on the phone, inside Termux + PRoot.
@@ -30,7 +32,8 @@ mamc      a Midnight Commander for every app on this phone, in folders:
           u updates mamc itself from GitHub
 talk      Claude's replies spoken aloud in Beatrice's voice, on a code word
 claudelogin  sign Claude Code in as a DIFFERENT account. Logs out first, then single keys:
-          o opens the login page in Chrome, p in a private tab, c copies the link,
+          o signs the browser out of claude.ai and opens the login in Chrome, x only the
+          sign-out, c copies the link,
           v pastes the code from the clipboard and sends it, s who am I, q quit
 ccnotify  a notification when Claude stops or needs you, with a button
           that pushes "continue" into the session from the lock screen

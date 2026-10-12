@@ -55,12 +55,12 @@ if a[:2] == ["auth", "login"]:
 opened = os.path.join(tmp, "opened")
 fake_open = script("opener", f'''
 import sys
-open({opened!r}, "w").write(sys.argv[1])
+open({opened!r}, "a").write(sys.argv[1] + "\\n")
 ''')
 fake_clip = script("clip", 'print("GOODCODE12345")')
 
 env = dict(os.environ, CLAUDELOGIN_CLAUDE=fake_claude, CLAUDELOGIN_OPEN=fake_open,
-           CLAUDELOGIN_CLIP=fake_clip, TERM="xterm", HOME=tmp)
+           CLAUDELOGIN_CLIP=fake_clip, CLAUDELOGIN_DELAY="0.3", TERM="xterm", HOME=tmp)
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
 proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "claudelogin", "claudelogin.py")],
@@ -99,9 +99,12 @@ def check(name, cond):
 
 check("logged out first", waitfor("1  logged out") and os.path.exists(state + ".out"))
 check("login link appears on screen", waitfor("claude.ai/oauth/authorize"))
-check("key bar shows open and paste code", "open" in scr.line(29) and "paste code" in scr.line(29))
+check("key bar shows open and paste code", "open" in scr.line(29) and "paste code" in scr.line(29) and "sign out" in scr.line(29))
 os.write(master, b"o")                     # one key, no Enter
-check("o opens the page with the link", waitfor("opened with") and open(opened).read().startswith("https://claude.ai/oauth/authorize"))
+ok = waitfor("login page opened")
+urls = open(opened).read().split() if os.path.exists(opened) else []
+check("o signs the browser out of claude.ai first, then opens the login", ok and len(urls) == 2
+      and urls[0] == "https://claude.ai/logout" and urls[1].startswith("https://claude.ai/oauth/authorize"))
 os.write(master, b"v")                     # one key, no Enter
 check("v sends the clipboard code to the login", waitfor("signed in: new@example.com", 15) and open(state + ".code").read() == "GOODCODE12345")
 check("the code itself is never drawn", "GOODCODE12345" not in scr.text())

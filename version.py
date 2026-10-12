@@ -14,6 +14,10 @@ v2: 12.10.2026. claudelogin: logs out, then logs in through a private browser ta
     browser cannot silently reuse the previous account. A full-screen app with mamc's key
     bar: o opens the login page in Chrome (mamc's open_page), p a private tab, c copies the
     link, v pastes the code from the clipboard into the login, s status, r again, q quit.
+v3: 12.10.2026. The orange terminal: theme.py is the one colour scheme (orange on black, 1980s),
+    read by mamc and claudelogin. claudelogin's o signs the browser out of claude.ai, waits, then
+    opens the login: Chrome did not honour a private tab from another app, so it logged straight
+    back into the old account.
 """
 
-APP_VERSION = 2
+APP_VERSION = 3

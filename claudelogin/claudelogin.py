@@ -3,8 +3,10 @@
 
 The screen is the same kind as mamc's: a key bar at the bottom, every key one press, no Enter.
 
-    o   open the login page in Chrome        (mamc's open_page: termux-open-url <url> com.android.chrome)
-    p   open it in a PRIVATE Chrome tab      (no claude.ai session in there, so it asks which account)
+    o   sign the browser out of claude.ai, then open the login page in Chrome (mamc's open_page:
+        termux-open-url <url> com.android.chrome), so it asks which account
+    x   only the sign-out of the browser
+    p   try a PRIVATE Chrome tab (Chrome often ignores this from another app)
     c   copy the login link to the clipboard
     v   paste the code from the clipboard into the login, and send it
     s   who am I signed in as
@@ -15,8 +17,8 @@ The workflow: claudelogin, o, sign in in the browser and copy the code it shows,
 
 Why the old account kept coming back: the browser is still signed in to claude.ai, and the login
 page approves that account without asking. claudelogin logs Claude Code out first (no old token
-to reuse), and p opens a private tab. If the page still skips the account choice, sign out at
-claude.ai in the browser once, or use p.
+to reuse), and o signs the browser out of claude.ai before it opens the login. A private tab was
+tried first and Chrome did not honour it from another app (Marko, 12.10.2026).
 
 Environment, for the tests: CLAUDELOGIN_CLAUDE (the claude command), CLAUDELOGIN_OPEN (a command
 that takes the url), CLAUDELOGIN_CLIP (a command that prints the clipboard).
@@ -36,6 +38,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +46,9 @@ CLAUDE = shlex.split(os.environ.get("CLAUDELOGIN_CLAUDE", "claude"))
 URL_RE = re.compile(r"https://[^\s\x1b\"'<>]+")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\r")
 CHROME = "com.android.chrome"
+LOGOUT_URL = "https://claude.ai/logout"
+sys.path.insert(0, os.path.join(HERE, ".."))
+import theme  # noqa: E402  the orange terminal, shared by every screen
 
 
 def version():
@@ -227,11 +233,11 @@ class UI:
         self.pasted, self.who = False, ""
         self.last_check = 0.0
         curses.curs_set(0)
-        curses.use_default_colors()
-        for i, (fg, bg) in enumerate([(curses.COLOR_WHITE, -1), (curses.COLOR_BLACK, curses.COLOR_WHITE),
-                                      (curses.COLOR_BLUE, -1), (curses.COLOR_GREEN, -1),
-                                      (curses.COLOR_RED, -1), (curses.COLOR_BLACK, curses.COLOR_CYAN)], 1):
-            curses.init_pair(i, fg, bg)
+        curses.start_color()
+        cols = theme.colors()
+        for i, role in enumerate(("norm", "head", "dim", "ok", "warn", "key"), 1):
+            curses.init_pair(i, *cols[role])
+        scr.bkgd(" ", curses.color_pair(1))
         scr.timeout(100)
         scr.keypad(True)
         self.say("logging out the current account...")
@@ -280,9 +286,9 @@ class UI:
             self.put(y, 1, "3  sign in in the browser, copy the code, come back, press v", 3)
         if self.msg:
             self.put(y + 2, 1, self.msg, 5 if self.bad else 4)
-        self.put(h - 3, 1, "if the page signs in the old account on its own: press p (private tab),", 3)
-        self.put(h - 2, 1, "or sign out at claude.ai in the browser once.", 3)
-        keys = [("o", "open"), ("p", "private"), ("c", "copy link"), ("v", "paste code"),
+        self.put(h - 3, 1, "o signs the browser out of claude.ai, then opens the login, so it asks", 3)
+        self.put(h - 2, 1, "which account. (It signs you out of claude.ai in Chrome as well.)", 3)
+        keys = [("o", "open"), ("v", "paste code"), ("x", "sign out"), ("c", "copy link"),
                 ("s", "status"), ("r", "again"), ("q", "quit")]
         x = 1
         for k, label in keys:
@@ -293,6 +299,18 @@ class UI:
             self.put(h - 1, x, label + " ", 1)
             x += len(label) + 2
         self.scr.refresh()
+
+    def open_fresh(self, url):
+        """The browser signed in to claude.ai is what picks the old account. Chrome does not honour
+        a private-tab request from another app, so sign it out instead, give that page time to
+        finish, then open the login: it has no account to reuse and asks which one."""
+        if not open_url(LOGOUT_URL):
+            self.say("could not open a browser - press c and paste the link yourself", True)
+            return
+        time.sleep(float(os.environ.get("CLAUDELOGIN_DELAY", "4")))
+        used = open_url(url)
+        self.say("login page opened - sign in, copy the code, come back, press v" if used else
+                 "could not open the login - press c and paste the link yourself", not used)
 
     def need_url(self):
         if not self.login.url:
@@ -313,9 +331,12 @@ class UI:
             return False
         if c == "o":
             if self.need_url():
-                used = open_url(self.login.url)
-                self.say(f"opened with {used}" if used else
-                         "could not open a browser - press c and paste the link yourself", not used)
+                self.say("signing the browser out of claude.ai first, then the login opens...")
+                threading.Thread(target=self.open_fresh, args=(self.login.url,), daemon=True).start()
+        elif c == "x":
+            used = open_url(LOGOUT_URL)
+            self.say("opened claude.ai/logout - the browser forgets the old account" if used else
+                     "could not open a browser", not used)
         elif c == "p":
             if self.need_url():
                 if open_private(self.login.url):
