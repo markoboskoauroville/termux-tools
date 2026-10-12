@@ -11,7 +11,9 @@ v1: 13.9.2026. Everything before it is the unnumbered delivery of the same day (
     README.md). mamc reads each app's live port from ~/.mantra/ports, has the U key and
     --version, and is installed by the curl line.
 v2: 12.10.2026. claudelogin: logs out, then logs in through a private browser tab so the
-    browser cannot silently reuse the previous account.
+    browser cannot silently reuse the previous account. A full-screen app with mamc's key
+    bar: o opens the login page in Chrome (mamc's open_page), p a private tab, c copies the
+    link, v pastes the code from the clipboard into the login, s status, r again, q quit.
 """
 
 APP_VERSION = 2

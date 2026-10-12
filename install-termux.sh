@@ -47,7 +47,7 @@ exec python3 \"\$HOME/.talker/talker.py\" \"\$@\""
 exec python3 \"\$HOME/.ccnotify/ccnotify.py\" \"\$@\""
     put "$d" claudelogin "$SHEBANG
 # claudelogin - log out and sign Claude Code in as a different account (private browser tab).
-exec bash \"$here/claudelogin/claudelogin\" \"\$@\""
+exec python3 \"$here/claudelogin/claudelogin.py\" \"\$@\""
     put "$d" ccpush  "$SHEBANG
 # ccpush TEXT - push a message into the running Claude Code session.
 exec python3 \"\$HOME/.ccnotify/ccnotify.py\" push \"\$@\""
