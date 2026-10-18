@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""adbup - connect adb to this phone, and keep it connected without Wi-Fi.
+
+    adbup            connect (localhost first, then Wi-Fi), and pin port 5555
+    adbup status     say what is connected, change nothing
+
+WHY. Wireless debugging only exists while the phone is on Wi-Fi: Android
+switches it off when Wi-Fi drops, and every time it comes back the connect
+port is a new random number. So adb kept vanishing.
+
+THE FIX. Once adb is connected by any route, `adb tcpip 5555` restarts the
+phone's adbd listening on a fixed port. Termux is on the same phone, so it
+connects to 127.0.0.1:5555, which needs no Wi-Fi at all. That lasts until the
+phone reboots. After a reboot: join Wi-Fi, turn Wireless debugging on, run
+adbup once, and it pins 5555 again. The pairing survives reboots.
+
+Finding the Wi-Fi port: this adb has no mDNS, so the Wi-Fi address is scanned
+30000-49999 in ONE process (asyncio). One process per port has already got
+Claude Code killed by Android's phantom-process limit.
+"""
+import asyncio
+import re
+import subprocess
+import sys
+import time
+
+LOCAL = "127.0.0.1:5555"
+
+
+def adb(*args, timeout=20):
+    try:
+        r = subprocess.run(["adb", *args], capture_output=True, text=True,
+                           timeout=timeout)
+        return (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return "timeout"
+
+
+def devices():
+    """Serials adb sees as usable 'device' (not offline/unauthorized)."""
+    out = adb("devices")
+    return [l.split()[0] for l in out.splitlines()[1:]
+            if l.strip().endswith("\tdevice") or l.split()[-1:] == ["device"]]
+
+
+def works(serial):
+    """A connection is only real if a shell command comes back."""
+    return adb("-s", serial, "shell", "echo", "ok", timeout=10) == "ok"
+
+
+def try_local():
+    if LOCAL in devices() and works(LOCAL):
+        return True
+    adb("disconnect", LOCAL)
+    adb("connect", LOCAL, timeout=10)
+    return LOCAL in devices() and works(LOCAL)
+
+
+def wifi_ip():
+    out = subprocess.run(["ip", "-4", "addr", "show", "wlan0"],
+                         capture_output=True, text=True).stdout
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else None
+
+
+async def _probe(ip, port, sem, found):
+    async with sem:
+        try:
+            _, w = await asyncio.wait_for(asyncio.open_connection(ip, port), 0.5)
+            w.close()
+            found.append(port)
+        except Exception:
+            pass
+
+
+async def _scan(ip):
+    sem, found = asyncio.Semaphore(400), []
+    await asyncio.gather(*(_probe(ip, p, sem, found)
+                           for p in range(30000, 50000)))
+    return sorted(found)
+
+
+def try_wifi():
+    ip = wifi_ip()
+    if not ip:
+        print("No Wi-Fi (no wlan0). Join Wi-Fi and turn Wireless debugging on, "
+              "then run adbup again.")
+        return None
+    # Already connected over Wi-Fi from an earlier run?
+    for s in devices():
+        if s.startswith(ip + ":") and works(s):
+            return s
+    print(f"Scanning {ip} for the Wireless debugging port (under 2 minutes)...")
+    for port in asyncio.run(_scan(ip)):
+        serial = f"{ip}:{port}"
+        adb("connect", serial, timeout=10)
+        if serial in devices() and works(serial):
+            return serial
+        adb("disconnect", serial)
+    print("No port answered as adb. Is Wireless debugging on? If it is, the "
+          "pairing may be lost: pair again with the six-digit code "
+          "(adb pair IP:PAIRPORT CODE).")
+    return None
+
+
+def main(argv):
+    if argv[:1] == ["status"]:
+        print(adb("devices"))
+        return 0
+    if try_local():
+        print(f"adb connected: {LOCAL} (works without Wi-Fi until reboot)")
+        return 0
+    serial = try_wifi()
+    if not serial:
+        return 1
+    print(f"Connected over Wi-Fi: {serial}. Pinning port 5555...")
+    adb("-s", serial, "tcpip", "5555")
+    for _ in range(10):
+        time.sleep(1)
+        if try_local():
+            # Drop the Wi-Fi serial so commands without -s are not ambiguous.
+            adb("disconnect", serial)
+            print(f"adb connected: {LOCAL} (works without Wi-Fi until reboot)")
+            return 0
+    print(f"Port 5555 did not come up; staying on {serial} (Wi-Fi only).")
+    adb("connect", serial)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
