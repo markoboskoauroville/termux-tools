@@ -64,6 +64,10 @@ def main():
     st = talker.load_state()
     if not st.get("on"):
         return 0
+    # A chat can be muted on its own while the others keep talking: its
+    # session id is listed in muted_sessions.
+    if data.get("session_id") in (st.get("muted_sessions") or []):
+        return 0
     # The reply is in the hook input itself; the transcript is the fallback
     # for an older Claude Code that does not send it. A session started with
     # transcript saving off has no file, and she was silent in those.
