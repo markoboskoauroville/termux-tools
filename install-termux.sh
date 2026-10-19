@@ -43,6 +43,9 @@ link_step() {
 exec python3 \"$here/mamc/mamc.py\" \"\$@\""
     put "$d" talk    "$SHEBANG
 exec python3 \"\$HOME/.talker/talker.py\" \"\$@\""
+    put "$d" hush    "$SHEBANG
+# hush - pause Beatrice if she is speaking, resume if paused (the |hush key).
+exec python3 \"\$HOME/.talker/talker.py\" toggle"
     put "$d" ccnotify "$SHEBANG
 exec python3 \"\$HOME/.ccnotify/ccnotify.py\" \"\$@\""
     put "$d" claudelogin "$SHEBANG

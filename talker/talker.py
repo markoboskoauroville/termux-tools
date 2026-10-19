@@ -9,6 +9,7 @@
     talk pause       pause speech
     talk resume      resume paused speech
     talk toggle      pause if playing, resume if paused (the notification button)
+    hush             the same toggle; also a code word typed alone into Claude
     talk test        one line, to hear that it works
 
 WHY IT IS A HOOK AND NOT A HABIT. Claude cannot decide to speak; it writes
@@ -437,6 +438,10 @@ OFF_RE = re.compile(r"^\s*(?:talk|voice|speak)\s*(?:mode\s*)?off\b[\s.!]*$", re.
 # "say ..." means speak these words. Anchored at the start, and refusing a
 # trailing question mark, so "what does the log say?" is left alone.
 SAY_RE = re.compile(r"^\s*say\s+(?!.*\?\s*$)(.+?)[\s.!]*$", re.I | re.S)
+# "hush" alone is the pause button: the |hush key on the Termux bar types it and
+# presses Enter. Pause if she is speaking, resume if paused. A new reply still
+# starts over from its own beginning -- say() stops whatever is paused first.
+HUSH_RE = re.compile(r"^\s*hush[\s.!]*$", re.I)
 
 
 
@@ -501,7 +506,7 @@ def main(argv):
         print(pause_current())
     elif cmd == "resume":
         print(resume_current())
-    elif cmd in ("toggle", "playpause"):
+    elif cmd in ("toggle", "playpause", "hush"):
         print(toggle_pause())
     elif cmd in ("-h", "--help", "help", ""):
         print(__doc__)

@@ -20,4 +20,4 @@ v3: 12.10.2026. The orange terminal: theme.py is the one colour scheme (orange o
     back into the old account.
 """
 
-APP_VERSION = 3
+APP_VERSION = 4

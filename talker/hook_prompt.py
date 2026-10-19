@@ -27,6 +27,15 @@ def main():
     # the spot, whether or not talk mode is on. It is anchored to the start of
     # the prompt so that asking what a file says, or to write code that says
     # something, is not mistaken for an order to speak.
+    # "hush" is the pause button, not something said to Claude. Toggle the
+    # speech and block the prompt: if it reached Claude, the reply to it
+    # would be spoken and start her talking again.
+    if talker.HUSH_RE.match(prompt):
+        result = talker.toggle_pause()
+        print(json.dumps({"decision": "block",
+                          "reason": f"hush: {result}"}))
+        return 0
+
     m = talker.SAY_RE.match(prompt)
     if m:
         words = m.group(1).strip()

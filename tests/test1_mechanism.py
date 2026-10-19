@@ -142,6 +142,9 @@ check("code fence not read out", "rm -rf" in tk.speakable("a\n```\nrm -rf /\n```
 check("empty in, empty out", tk.speakable(""), "")
 check("whitespace only", tk.speakable("   \n\n  "), "")
 check("a question mark survives", tk.speakable("Is it on?").endswith("?"), True)
+check("hush alone is the pause word", bool(tk.HUSH_RE.match("hush")), True)
+check("hush with a full stop", bool(tk.HUSH_RE.match(" Hush. ")), True)
+check("hush inside a sentence is left alone", bool(tk.HUSH_RE.match("why did you hush")), False)
 import json
 
 print("play_file - a Stop is a finished playback, not a failure to fall back from")
