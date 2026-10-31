@@ -5,6 +5,7 @@
     talk off         silence
     talk status      which it is, and what it would use
     talk say TEXT    speak this now, whatever the switch says
+    talk say --hr T  the same, read as Croatian (Edge); --en as English (Speechify)
     talk stop        shut up mid-sentence
     talk pause       pause speech
     talk resume      resume paused speech
@@ -18,6 +19,12 @@ a reply is finished, reads the last message out of the transcript, and sends it
 here. `talk on` and `talk off` are read by a UserPromptSubmit hook, which is
 why they work as things you SAY rather than commands you run -- and why they
 work in every chat in this environment, not just the one they were typed in.
+
+THE ENGINE IS MA READER (31.10.2026). Every clip is asked of the MA Reader
+server's /api/say, so one app with one fallback chain is the voice of this
+phone: Croatian is read by Edge, English by Speechify, and each falls back
+inside the reader (Edge -> Google -> Speechify, Speechify -> Edge -> Google).
+Only when the reader is not running does the talker call Speechify itself.
 
 THE VOICE. Beatrice, from Speechify (beatrice_32, British, warm) -- the same
 voice and the same key file MA Reader uses, so there is one place to change it.
@@ -64,7 +71,8 @@ KEY_FILES = [
 SP_API = "https://api.sws.speechify.com"
 SP_MODEL = "simba-english"
 DEFAULTS = {"on": False, "voice": "beatrice_32", "name": "Beatrice",
-            "engine": "speechify", "limit": 1200}
+            "engine": "maread", "limit": 1200}
+MAREAD_PORT_FILE = "/data/data/com.termux/files/home/.maread-web/port.txt"
 
 KEY_RE = re.compile(r"\bsk_[0-9A-Za-z_-]{16,}\b")
 
@@ -369,12 +377,41 @@ def speechify(text, voice):
     return path, None
 
 
-def android_voice(text):
+def maread(text, lang="auto"):
+    """One clip from the MA Reader server. Its port is in port.txt, written
+    by the server itself; 8081 when the file is missing."""
+    try:
+        port = int(open(MAREAD_PORT_FILE).read().strip() or 8081)
+    except (OSError, ValueError):
+        port = 8081
+    import urllib.request
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/api/say" % port,
+        data=json.dumps({"text": text, "lang": lang}).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            audio = r.read()
+            engine = r.headers.get("X-Engine", "?")
+    except Exception as e:
+        return None, f"ma reader: {e}"
+    if not audio:
+        return None, "ma reader returned no audio"
+    fd, path = tempfile.mkstemp(suffix=".mp3", dir=TALK_DIR)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(audio)
+    log(f"ma reader spoke with {engine}")
+    return path, None
+
+
+def android_voice(text, lang="auto"):
     """The fallback. Offline, always there, not Beatrice."""
     try:
         open(BG_FLAG, "w").close()
-        subprocess.run(["termux-tts-speak", "-e", "com.google.android.tts",
-                        text], timeout=600)
+        cmd = ["termux-tts-speak", "-e", "com.google.android.tts"]
+        if lang == "hr":
+            cmd += ["-l", "hr"]
+        subprocess.run(cmd + [text], timeout=600)
         try:
             os.remove(BG_FLAG)
         except OSError:
@@ -403,14 +440,31 @@ def sweep_old_clips(older_than=600):
         pass
 
 
-def say(text, st=None, force_engine=None):
+def say(text, st=None, force_engine=None, lang="auto"):
     st = st or load_state()
     sweep_old_clips()
     text = speakable(text, st.get("limit", 1200))
     if not text:
         return "nothing to say"
     stop_playing()
-    engine = force_engine or st.get("engine", "speechify")
+    engine = force_engine or st.get("engine", "maread")
+    if engine == "maread":
+        path, err = maread(text, lang)
+        if path:
+            ok, may_delete = play_file(path, text[:80])
+            if may_delete:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            if ok:
+                return None
+            log("playback failed")
+        else:
+            log(err)
+        # The reader is not running. Speechify's English model would mangle
+        # Croatian, so only English goes to it from here.
+        engine = "android" if lang == "hr" else "speechify"
     if engine == "speechify":
         path, err = speechify(text, st.get("voice", "beatrice_32"))
         if path:
@@ -425,7 +479,7 @@ def say(text, st=None, force_engine=None):
             log("playback failed, falling back to the android voice")
         else:
             log(f"speechify: {err}")
-    android_voice(text)
+    android_voice(text, lang)
     return None
 
 
@@ -487,8 +541,11 @@ def main(argv):
         say("This is Beatrice. If you can hear me, the talker is working.", st,
             force_engine=argv[1] if len(argv) > 1 else None)
     elif cmd == "say":
-        text = " ".join(argv[1:]) or sys.stdin.read()
-        err = say(text, st)
+        rest, lang = argv[1:], "auto"
+        if rest and rest[0] in ("--hr", "--en"):
+            lang, rest = rest[0][2:], rest[1:]
+        text = " ".join(rest) or sys.stdin.read()
+        err = say(text, st, lang=lang)
         if err:
             print(err)
     elif cmd == "voice":
@@ -498,7 +555,7 @@ def main(argv):
             save_state(st)
         print(f"voice: {st.get('name')} ({st.get('voice')})")
     elif cmd == "engine":
-        if len(argv) > 1 and argv[1] in ("speechify", "android"):
+        if len(argv) > 1 and argv[1] in ("maread", "speechify", "android"):
             st["engine"] = argv[1]
             save_state(st)
         print(f"engine: {st.get('engine')}")
