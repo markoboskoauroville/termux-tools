@@ -9,7 +9,8 @@
     talk stop        shut up mid-sentence
     talk pause       pause speech
     talk resume      resume paused speech
-    talk toggle      pause if playing, resume if paused (the notification button)
+    talk toggle      pause if playing, resume if paused (the notification's
+                     Pause / Play button, which turns into the other one)
     hush             the same toggle; also a code word typed alone into Claude
     talk test        one line, to hear that it works
 
@@ -60,6 +61,14 @@ MPV_QUIT_RC = 4
 # making noise, and pure waste before every single utterance otherwise.
 BG_FLAG = os.path.join(TALK_DIR, "background_player")
 NOTIF_ID = "talker_speech"
+# What is being said, kept while she says it, so the notification can be put
+# up again with Play instead of Pause by `talk toggle` -- which runs as a new
+# process, from the notification's button, and knows nothing else.
+NOW_FILE = os.path.join(TALK_DIR, "speaking.txt")
+# How long one clip may hold the talker, paused time included (2.11.2026: a
+# pause longer than the old 15 minutes counted as a failed playback, and the
+# fallback player then read the whole clip again from the top).
+PLAY_LIMIT_S = 3 * 3600
 TALK_BIN = "/data/data/com.termux/files/usr/bin/talk"
 LOG_FILE = os.path.join(TALK_DIR, "talker.log")
 KEY_FILES = [
@@ -238,8 +247,12 @@ def mpv_command(*args):
         return False, str(e)
 
 
-def show_controls(text):
+def show_controls(text, paused=False, wait=False):
     """A pinned notification with the three buttons, while she is speaking.
+
+    Marko, 2.11.2026: "pause is toggle pause, pause and play, and stop just
+    stops it." So the first button says what it will do: Pause while she
+    speaks, Play while she is paused, and `talk toggle` swaps the label.
 
     The buttons run `talk pause|resume|stop` -- and they run them OUTSIDE
     this PRoot, in Termux's own shell. That works only because /root here and
@@ -253,10 +266,15 @@ def show_controls(text):
         # better part of ten seconds on this phone, and waiting for it meant
         # ten seconds of silence before Beatrice said anything. The
         # notification can catch up with her.
-        subprocess.Popen([
+        try:
+            with open(NOW_FILE, "w") as fh:
+                fh.write(text or "")
+        except OSError:
+            pass
+        cmd = [
             "termux-notification",
             "--id", NOTIF_ID,
-            "--title", "Beatrice is speaking",
+            "--title", "Paused" if paused else "Beatrice is speaking",
             "--content", (text or "")[:70],
             "--priority", "high",
             "--ongoing",
@@ -265,11 +283,15 @@ def show_controls(text):
             # Resume were two of them, so there was no room for Off -- and
             # Off is the one you want when she starts reading a long reply
             # you have already seen. One toggle does both halves.
-            "--button1", "Pause/Resume", "--button1-action", TALK_BIN + " toggle",
+            "--button1", "Play" if paused else "Pause", "--button1-action", TALK_BIN + " toggle",
             "--button2", "Stop", "--button2-action", TALK_BIN + " stop",
             "--button3", "Off", "--button3-action", TALK_BIN + " off",
             "--on-delete", TALK_BIN + " stop",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ]
+        if wait:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        else:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         log(f"notification failed: {e}")
 
@@ -280,10 +302,11 @@ def hide_controls():
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    try:
-        os.remove(PID_FILE)
-    except OSError:
-        pass
+    for f in (PID_FILE, NOW_FILE):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
 
 def play_file(path, text=""):
@@ -311,7 +334,16 @@ def play_file(path, text=""):
         with open(PID_FILE, "w") as fh:
             fh.write(str(p.pid))
         show_controls(text)
-        rc = p.wait(timeout=900)
+        try:
+            rc = p.wait(timeout=PLAY_LIMIT_S)
+        except subprocess.TimeoutExpired:
+            # Left paused for hours: give up on this clip quietly. NOT a
+            # failure -- a failure would hand it to the backup player.
+            p.kill()
+            p.wait()
+            hide_controls()
+            log("clip given up after the play limit")
+            return True, True
         hide_controls()
         if rc == 0:
             return True, True
@@ -501,18 +533,45 @@ HUSH_RE = re.compile(r"^\s*hush[\s.!]*$", re.I)
 
 
 # Pause and resume for interactive control
+def relabel():
+    """Put the notification up again with the button the state now needs:
+    Play while paused, Pause while speaking. Asked of mpv, not guessed."""
+    ok, reply = mpv_command("get_property", "pause")
+    if not ok:
+        return
+    try:
+        paused = bool(json.loads(reply.splitlines()[0]).get("data"))
+    except Exception:
+        return
+    try:
+        text = open(NOW_FILE).read()
+    except OSError:
+        return  # she has finished: nothing to relabel
+    show_controls(text, paused=paused, wait=True)
+    # The clip may have ended during the second that call takes; then the
+    # notification just put up would stay forever. Take it down again.
+    if not os.path.exists(PID_FILE):
+        hide_controls()
+
+
 def pause_current():
     ok, why = mpv_command("set_property", "pause", True)
+    if ok:
+        relabel()
     return "paused" if ok else f"nothing playing ({why})"
 
 
 def resume_current():
     ok, why = mpv_command("set_property", "pause", False)
+    if ok:
+        relabel()
     return "resumed" if ok else f"nothing to resume ({why})"
 
 
 def toggle_pause():
     ok, _ = mpv_command("cycle", "pause")
+    if ok:
+        relabel()
     return "toggled" if ok else "nothing playing"
 
 
