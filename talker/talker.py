@@ -14,6 +14,13 @@
     hush             the same toggle; also a code word typed alone into Claude
     talk test        one line, to hear that it works
 
+    talk sub on|off          the subtitle (Voice Engine Android) on or off
+    talk sub test [TEXT]     show a subtitle without a voice
+    talk sub hide|stop       the subtitle's HIDE, its STOP
+    talk sub status          the app, its port, its settings
+    talk sub set k=v ...     size colour band grey position bold word wordbg
+                             linger offset ypos (the Mac's subtitle.json keys)
+
 WHY IT IS A HOOK AND NOT A HABIT. Claude cannot decide to speak; it writes
 text and stops. So the speaking is done by the harness: a Stop hook fires when
 a reply is finished, reads the last message out of the transcript, and sends it
@@ -334,8 +341,16 @@ def play_file(path, text=""):
         with open(PID_FILE, "w") as fh:
             fh.write(str(p.pid))
         show_controls(text)
+        feed = None
+        if SUB_WORDS.get("text"):
+            import threading
+            feed = threading.Thread(target=subtitle_feed, daemon=True,
+                                    args=(p, SUB_WORDS["text"], list(SUB_WORDS.get("words") or [])))
+            feed.start()
         try:
             rc = p.wait(timeout=PLAY_LIMIT_S)
+            if feed:
+                feed.join(1.5)
         except subprocess.TimeoutExpired:
             # Left paused for hours: give up on this clip quietly. NOT a
             # failure -- a failure would hand it to the backup player.
@@ -398,11 +413,16 @@ def speechify(text, voice):
     if r.status_code != 200:
         return None, f"http {r.status_code}: {r.text[:160]}"
     try:
-        audio = base64.b64decode(r.json().get("audio_data") or "")
+        body = r.json()
+        audio = base64.b64decode(body.get("audio_data") or "")
     except Exception as e:
         return None, f"bad body: {e}"
     if not audio:
         return None, "no audio came back"
+    try:
+        SUB_WORDS.update(text=text, words=sp_words(text, body.get("speech_marks")))
+    except Exception as e:
+        log(f"speech marks: {e}")
     fd, path = tempfile.mkstemp(suffix=".mp3", dir=TALK_DIR)
     with os.fdopen(fd, "wb") as fh:
         fh.write(audio)
@@ -419,12 +439,19 @@ def maread(text, lang="auto"):
     import urllib.request
     req = urllib.request.Request(
         "http://127.0.0.1:%d/api/say" % port,
-        data=json.dumps({"text": text, "lang": lang}).encode("utf-8"),
+        data=json.dumps({"text": text, "lang": lang, "words": True}).encode("utf-8"),
         headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             audio = r.read()
             engine = r.headers.get("X-Engine", "?")
+            try:
+                if r.headers.get("X-Words"):
+                    SUB_WORDS.update(
+                        text=base64.b64decode(r.headers.get("X-Text") or "").decode("utf-8") or text,
+                        words=json.loads(base64.b64decode(r.headers["X-Words"]).decode("utf-8")))
+            except Exception as e:
+                log(f"ma reader words: {e}")
     except Exception as e:
         return None, f"ma reader: {e}"
     if not audio:
@@ -479,6 +506,7 @@ def say(text, st=None, force_engine=None, lang="auto"):
     if not text:
         return "nothing to say"
     stop_playing()
+    SUB_WORDS.update(text=text, words=[])
     engine = force_engine or st.get("engine", "maread")
     if engine == "maread":
         path, err = maread(text, lang)
@@ -514,6 +542,205 @@ def say(text, st=None, force_engine=None, lang="auto"):
     android_voice(text, lang)
     return None
 
+
+
+# ---------------------------------------------------------------------------
+#  The subtitle: Voice Engine (Mantra) for Android, VOICE_ENGINE_ANDROID
+# ---------------------------------------------------------------------------
+# The same subtitle as on the Mac (VOICE_ENGINE): the words being spoken over
+# every app, the word being said lit. The Mac's app asks its voice server where
+# the voice is; here the voice is mpv, so the talker tells the app instead:
+# POST /start with the text and the word timings, then POST /pos five times a
+# second, and each answer says whether the subtitle's STOP or the
+# notification's PAUSE was pressed. No app, no subtitle, and nothing else
+# changes: every call here is allowed to fail.
+
+SUB_PORT_FILE = os.path.join(TALK_DIR, "subtitle_port")
+SUB_PORTS = list(range(8720, 8736))
+SUB_WORDS = {"text": "", "words": []}
+
+
+def sp_words(text, marks):
+    """Speechify's speech marks -> [{s, e, t, d}], as MA Reader's sp_tokens:
+    character offsets into the text it was given, seconds into the clip."""
+    flat = []
+
+    def walk(node):
+        if isinstance(node, list):
+            for c in node:
+                walk(c)
+            return
+        if not isinstance(node, dict):
+            return
+        kids = node.get("chunks") or node.get("nestedChunks") or []
+        if kids:
+            walk(kids)
+        elif "start_time" in node or "startTime" in node:
+            flat.append(node)
+
+    walk(marks or {})
+    n, out = len(text), []
+    for m in flat:
+        try:
+            s = int(m.get("start", m.get("startOffset", 0)))
+            e = int(m.get("end", m.get("endOffset", s)))
+            t = float(m.get("start_time", m.get("startTime", 0))) / 1000.0
+            d = float(m.get("end_time", m.get("endTime", 0))) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        s, e = max(0, min(n, s)), max(0, min(n, e))
+        if e > s:
+            out.append({"s": s, "e": e, "t": round(t, 3), "d": round(max(d, t), 3)})
+    out.sort(key=lambda w: (w["t"], w["s"]))
+    return out
+
+
+def sub_http(port, path, body=None, timeout=0.6):
+    import urllib.request
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def sub_port():
+    """The app's port: the one it answered on last time, else 8720..8735."""
+    first = []
+    try:
+        first = [int(open(SUB_PORT_FILE).read().strip())]
+    except (OSError, ValueError):
+        pass
+    for p in first + [p for p in SUB_PORTS if p not in first]:
+        try:
+            if sub_http(p, "/status", timeout=0.4).get("app") == "voiceengine":
+                if p not in first:
+                    try:
+                        with open(SUB_PORT_FILE, "w") as fh:
+                            fh.write(str(p))
+                    except OSError:
+                        pass
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def mpv_props(*props):
+    """Several properties in one visit to mpv's socket. A property mpv cannot
+    give yet (duration before the file is open) comes back as None. mpv also
+    writes events on the same socket, so replies are matched by request_id."""
+    import socket as _socket
+    out = {p: None for p in props}
+    try:
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        sock.connect(IPC_SOCKET)
+        for i, p in enumerate(props, 1):
+            sock.sendall((json.dumps({"command": ["get_property", p],
+                                      "request_id": i}) + "\n").encode())
+        buf, want = b"", set(range(1, len(props) + 1))
+        while want:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                rid = msg.get("request_id")
+                if rid in want:
+                    want.discard(rid)
+                    if msg.get("error") == "success":
+                        out[props[rid - 1]] = msg.get("data")
+        sock.close()
+    except Exception:
+        pass
+    return out
+
+
+def subtitle_feed(proc, text, words):
+    port = sub_port()
+    if not port:
+        return
+    rid = "%x" % int(time.time() * 1000)
+    try:
+        sub_http(port, "/start", {"id": rid, "text": text, "words": words}, timeout=1.5)
+    except Exception as e:
+        log(f"subtitle start: {e}")
+        return
+    log(f"subtitle on :{port}, {len(words)} timed words")
+    misses = 0
+    while proc.poll() is None:
+        time.sleep(0.2)
+        pr = mpv_props("time-pos", "pause", "duration")
+        if pr["time-pos"] is None and proc.poll() is not None:
+            break
+        try:
+            reply = sub_http(port, "/pos", {
+                "id": rid, "pos": pr["time-pos"] if pr["time-pos"] is not None else -1,
+                "paused": bool(pr["pause"]), "dur": pr["duration"] or 0})
+            misses = 0
+        except Exception:
+            misses += 1
+            if misses > 10:
+                return
+            continue
+        cmd = reply.get("cmd") or ""
+        if cmd == "stop":
+            log("stopped from the subtitle")
+            stop_playing()
+            break
+        if cmd == "toggle":
+            import threading
+            threading.Thread(target=toggle_pause, daemon=True).start()
+    try:
+        sub_http(port, "/end", {"id": rid})
+    except Exception:
+        pass
+
+
+def sub_command(args):
+    """talk sub ...: Voice Engine Android, from Claude Code or any shell."""
+    port = sub_port()
+    if not port:
+        return ("Voice Engine (Mantra) is not answering on 127.0.0.1:8720-8735. "
+                "Open the app once, or install it from github.com/markoboskoauroville/VOICE_ENGINE_ANDROID.")
+    what = (args[0] if args else "status").lower()
+    try:
+        if what in ("on", "off"):
+            sub_http(port, "/subtitles", {"on": what == "on"})
+            return f"subtitles {what}"
+        if what == "test":
+            r = sub_http(port, "/test", {"text": " ".join(args[1:]), "seconds": 8})
+            return "shown for 8 s" if r.get("overlay") else "the app may not draw over other apps yet: open it and press ALLOW"
+        if what in ("hide", "stop", "toggle"):
+            sub_http(port, "/" + what, {})
+            return what
+        if what == "set":
+            body = {}
+            for kv in args[1:]:
+                if "=" not in kv:
+                    continue
+                k, v = kv.split("=", 1)
+                if v.lower() in ("true", "on", "yes"):
+                    body[k] = True
+                elif v.lower() in ("false", "off", "no"):
+                    body[k] = False
+                else:
+                    try:
+                        body[k] = float(v)
+                    except ValueError:
+                        body[k] = v
+            return json.dumps(sub_http(port, "/settings", body), indent=1)
+        st = sub_http(port, "/status")
+        st["settings"] = sub_http(port, "/settings")
+        return json.dumps(st, indent=1)
+    except Exception as e:
+        return f"voice engine: {e}"
 
 # ---------------------------------------------------------------------------
 #  The words you say
@@ -618,6 +845,8 @@ def main(argv):
             st["engine"] = argv[1]
             save_state(st)
         print(f"engine: {st.get('engine')}")
+    elif cmd in ("sub", "subtitle", "subtitles"):
+        print(sub_command(argv[1:]))
     elif cmd == "pause":
         print(pause_current())
     elif cmd == "resume":
