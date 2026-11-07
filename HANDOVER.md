@@ -7,6 +7,18 @@ Version: `version.py`, one whole number (v1 is the first numbered one). Reposito
 curl line in README.md installs it, and mamc's `u` key updates it. The reasons for what is here are
 in the delivery records at the bottom of README.md, newest first.
 
+
+## talk feeds the phone's subtitle (7.11.2026)
+
+`talk` tells Voice Engine (Mantra) for Android (repo VOICE_ENGINE_ANDROID, skill `voice-engine-android`) what it says,
+so the Mac's subtitle shows over every app. In `talker/talker.py`: `subtitle_feed` (thread started by `play_file`:
+`POST /start`, then `/pos` five times a second from mpv's IPC socket, obeying the `cmd` it returns, then `/end`),
+`sub_port` (8720-8735, cached in `SUB_PORT_FILE`), `sub_command` (`talk sub on|off|test|hide|stop|toggle|status|set k=v`).
+Word timings: MA Reader `/api/say` with `"words": true` (X-Words, X-Text), else Speechify speech marks (`SUB_WORDS`),
+else none. Verified on the phone 7.11.2026. Change `talker/talker.py` here AND the copy `~/.talker/talker.py`.
+When MA Reader is not running, talk goes to Speechify directly without saying so; check
+`grep spoke ~/.talker/*.log | tail -1`.
+
 ## What it is
 
 Three programs built on the phone, inside Termux + PRoot, in one repository because they ship
