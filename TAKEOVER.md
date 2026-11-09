@@ -1,3 +1,7 @@
+
+
+## From the former README (9.11.2026)
+
 # Termux tools
 
 ```sh
