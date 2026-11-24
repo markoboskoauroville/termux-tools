@@ -68,6 +68,15 @@ def main():
     # session id is listed in muted_sessions.
     if data.get("session_id") in (st.get("muted_sessions") or []):
         return 0
+    # One voice at a time (Marko, 24.11.2026: "two voices are speaking at the same time. This is
+    # unacceptable"): if the phone's voice daemon is speaking or has lines queued (vsay), stay silent.
+    try:
+        import urllib.request
+        h = json.load(urllib.request.urlopen("http://127.0.0.1:8840/health", timeout=2))
+        if h.get("speaking") or h.get("queued"):
+            return 0
+    except Exception:
+        pass
     # The reply is in the hook input itself; the transcript is the fallback
     # for an older Claude Code that does not send it. A session started with
     # transcript saving off has no file, and she was silent in those.
